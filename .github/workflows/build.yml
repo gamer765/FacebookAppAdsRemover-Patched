@@ -1,0 +1,110 @@
+name: Build patched FacebookAppAdsRemover
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout build workspace
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream v1.9 source
+        run: |
+          git clone --depth 1 --branch 1.9 https://github.com/Loukious/FacebookAppAdsRemover.git upstream
+
+      - name: Apply v1.9.1-patched fixes
+        working-directory: upstream
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('app/src/main/java/tn/loukious/facebookappadsremover/Patches.kt')
+          s = p.read_text()
+
+          old = '''    // Item class -> candidate accessor chains (each chain is a sequence of
+    // zero-arg getters from item to model). Null entries are cached misses.
+    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>?>()
+'''
+          new = '''    // Item class -> candidate accessor chains (each chain is a sequence of
+    // zero-arg getters from item to model). ConcurrentHashMap rejects null values,
+    // so misses are tracked separately instead of being written as null entries.
+    private val accessorChainsCache = ConcurrentHashMap<Class<*>, List<List<Method>>>()
+    private val accessorChainMissCache = ConcurrentHashMap<Class<*>, Boolean>()
+'''
+          if old not in s:
+              raise SystemExit('accessorChainsCache block not found')
+          s = s.replace(old, new, 1)
+
+          old = '''    private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>>? {
+        accessorChainsCache.get(clazz)?.let { return it }
+        val chains = runCatching { findAccessorChains(clazz) }.getOrNull()
+        accessorChainsCache[clazz] = chains
+        return chains
+    }
+'''
+          new = '''    private fun resolveAccessorChains(clazz: Class<*>): List<List<Method>>? {
+        accessorChainsCache[clazz]?.let { return it }
+        if (accessorChainMissCache.containsKey(clazz)) return null
+
+        val chains = runCatching { findAccessorChains(clazz) }.getOrNull()
+        if (chains == null) {
+            accessorChainMissCache[clazz] = true
+        } else {
+            accessorChainsCache[clazz] = chains
+        }
+        return chains
+    }
+'''
+          if old not in s:
+              raise SystemExit('resolveAccessorChains block not found')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          b = Path('app/build.gradle.kts')
+          s = b.read_text()
+          s = s.replace('versionCode = 10', 'versionCode = 11', 1)
+          s = s.replace('versionName = "1.9"', 'versionName = "1.9.1-patched"', 1)
+          b.write_text(s)
+          PY
+
+          echo '--- patched classifier ---'
+          grep -n -A18 -B5 'accessorChainMissCache' app/src/main/java/tn/loukious/facebookappadsremover/Patches.kt
+          echo '--- patched version ---'
+          grep -n 'versionCode\|versionName' app/build.gradle.kts
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build release APK
+        working-directory: upstream
+        run: gradle --no-daemon --stacktrace :app:assembleRelease
+
+      - name: Show APK details
+        working-directory: upstream
+        run: |
+          find app/build/outputs/apk -type f -name '*.apk' -print -exec sha256sum {} \;
+
+      - name: Upload unsigned source-built APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FacebookAppAdsRemover-v1.9.1-patched-unsigned
+          path: upstream/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 7
