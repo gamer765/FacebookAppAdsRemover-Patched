@@ -21,9 +21,11 @@ jobs:
         run: |
           cp scripts/patch_v1_9.py upstream/patch_v1_9.py
           cp scripts/patch_v1_9_4.py upstream/patch_v1_9_4.py
+          cp scripts/patch_v1_9_4_fix.py upstream/patch_v1_9_4_fix.py
           cd upstream
           python3 patch_v1_9.py
           python3 patch_v1_9_4.py
+          python3 patch_v1_9_4_fix.py
 
       - name: Set up Java 21
         uses: actions/setup-java@v4
