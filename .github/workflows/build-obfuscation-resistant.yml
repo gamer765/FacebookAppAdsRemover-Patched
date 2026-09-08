@@ -1,0 +1,41 @@
+name: Build obfuscation-resistant experiment
+
+on:
+  push:
+    branches:
+      - experiment/obfuscation-resistant-hooks
+    paths:
+      - 'source/**'
+      - '.github/workflows/build-obfuscation-resistant.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build experimental release APK
+        run: |
+          cd source
+          gradle --no-daemon :app:assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FacebookAppAdsRemover-v1.10.0-obfexp1-unsigned
+          path: source/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
