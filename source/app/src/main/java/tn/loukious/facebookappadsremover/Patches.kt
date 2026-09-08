@@ -8664,6 +8664,17 @@ private fun installReelsPrimarySponsoredFetchBlock(classLoader: ClassLoader, bri
         "all Reels ad dispatchers",
         "reels_ad_query_send"
     )
+    hookVoidByStrings(
+        "commercial-break video ad dispatchers",
+        "commercial_break_query_send",
+        "Kicking off video ad fetch"
+    )
+    hookVoidByStrings(
+        "ad-break server fetchers",
+        "AdBreakServerAPI",
+        "Fetch adbreak when already fetching",
+        "PRE_ROLL"
+    )
     hookVoidByStrings("profile Reels async sponsored fetch", "ProfileReelsAsyncAdsQuery")
     hookVoidByStrings(
         "Reels ads background prefetch",
@@ -8716,11 +8727,15 @@ private fun installReelsAsyncAdNetworkBlock(classLoader: ClassLoader, bridge: De
 }
 
 // ---------------------------------------------------------------------------
-// Facebook 576.0.0.42.73 / 474227118 account-specific video/Reels ad fast
-// paths. These are exact fallbacks for the user's current build and fail
-// harmlessly when Facebook changes the obfuscated names.
+// Facebook 576.0.0.42.73 / 474227118 and Facebook 577.0.0.50.72 /
+// 474426253 account-specific video/Reels ad fast paths. These exact
+// fallbacks install before the slower DexKit scan and fail harmlessly when
+// Facebook changes obfuscated names again.
 // ---------------------------------------------------------------------------
-private val facebook576FastPathHookedMethods: MutableSet<Method> =\n    Collections.synchronizedSet(HashSet())\n\nfun installFacebook576VideoInterruptionFastPaths(classLoader: ClassLoader) {
+private val facebook576FastPathHookedMethods: MutableSet<Method> =
+    Collections.synchronizedSet(HashSet())
+
+fun installFacebook576VideoInterruptionFastPaths(classLoader: ClassLoader) {
     fun resolveClass(name: String): Class<*>? =
         runCatching { Class.forName(name, false, classLoader) }.getOrNull()
 
@@ -8747,10 +8762,10 @@ private val facebook576FastPathHookedMethods: MutableSet<Method> =\n    Collecti
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 param.result = null
-                AndroidLog.i(TAG, "Blocked Facebook 576 ad path: $className.$methodName")
+                AndroidLog.i(TAG, "Blocked Facebook fast ad path: $className.$methodName")
             }
         })
-        AndroidLog.i(TAG, "Installed Facebook 576 ad hook: $className.$methodName")
+        AndroidLog.i(TAG, "Installed Facebook fast ad hook: $className.$methodName")
         return true
     }
 
@@ -8864,12 +8879,101 @@ private val facebook576FastPathHookedMethods: MutableSet<Method> =\n    Collecti
         listOf("X.6Bl", "kotlin.jvm.functions.Function1")
     )
 
+    // Facebook 577.0.0.50.72 / 474426253 renamed the obfuscated Reels and
+    // commercial-break classes while retaining the same stable query strings.
+    // These exact hooks close the cold-start window before DexKit can resolve
+    // the corresponding stable-string methods.
+    val primaryReelsFetch577 = hookExact(
+        "X.7ez",
+        "A0B",
+        listOf("com.facebook.auth.usersession.FbUserSession", "X.7ej", "int")
+    )
+
+    val reelsAdDispatcher577 = hookExact(
+        "X.7ez",
+        "A09",
+        listOf(
+            "com.facebook.auth.usersession.FbUserSession",
+            "X.7ez",
+            "X.7ej",
+            "int"
+        )
+    )
+
+    val commercialBreakDispatcher577 = hookExact(
+        "X.SQq",
+        "A02",
+        listOf(
+            "X.SRC",
+            "X.3zW",
+            "X.V9M",
+            "X.7ej",
+            "java.lang.Boolean",
+            "java.lang.Integer",
+            "java.lang.String",
+            "java.lang.String",
+            "java.lang.String",
+            "java.lang.String",
+            "int",
+            "int",
+            "long",
+            "boolean",
+            "boolean",
+            "boolean"
+        )
+    )
+
+    val profileReelsFetch577 = hookExact(
+        "X.B5Y",
+        "A03",
+        listOf(
+            "com.facebook.auth.usersession.FbUserSession",
+            "java.lang.Integer",
+            "java.lang.Integer",
+            "boolean"
+        )
+    )
+
+    val mainFetcher577 = hookExact(
+        "X.SMj",
+        "A05",
+        listOf(
+            "com.facebook.auth.usersession.FbUserSession",
+            "X.3zW",
+            "X.56N",
+            "int",
+            "boolean",
+            "boolean"
+        )
+    )
+
+    val helperFetcher577 = hookExact(
+        "X.SMM",
+        "A07",
+        listOf(
+            "com.facebook.auth.usersession.FbUserSession",
+            "X.3zW",
+            "X.3zW",
+            "X.SMM"
+        )
+    )
+
+    val similarAdTrigger577 = hookExact("X.6V0", "invoke", emptyList())
+    val rtiTrigger577 = hookExact("X.6V3", "invoke", emptyList())
+    val poeTrigger577 = hookExact("X.6V6", "invoke", emptyList())
+    val adChannel577 = hookExact("X.53Y", "Ael", listOf("X.1kN", "X.5Cd"))
+
     AndroidLog.i(
         TAG,
-        "Facebook 576 ad hooks: reelsPrimary=$primaryReelsFetch reelsDispatch=$reelsAdDispatcher " +
+        "Facebook 576/577 ad hooks: " +
+            "576[reelsPrimary=$primaryReelsFetch reelsDispatch=$reelsAdDispatcher " +
             "commercialBreak=$commercialBreakDispatcher profileReels=$profileReelsFetch " +
             "reelsPrefetch=$reelsBackgroundPrefetch watchMain=$mainFetcher watchHelper=$helperFetcher " +
-            "similar=$similarAdTrigger rti=$rtiTrigger poe=$poeTrigger " +
-            "adChannel=$adChannel interstitial=$interstitialBuilder"
+            "similar=$similarAdTrigger rti=$rtiTrigger poe=$poeTrigger adChannel=$adChannel " +
+            "interstitial=$interstitialBuilder] " +
+            "577[reelsPrimary=$primaryReelsFetch577 reelsDispatch=$reelsAdDispatcher577 " +
+            "commercialBreak=$commercialBreakDispatcher577 profileReels=$profileReelsFetch577 " +
+            "watchMain=$mainFetcher577 watchHelper=$helperFetcher577 similar=$similarAdTrigger577 " +
+            "rti=$rtiTrigger577 poe=$poeTrigger577 adChannel=$adChannel577]"
     )
 }
