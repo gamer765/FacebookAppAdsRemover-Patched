@@ -4,6 +4,10 @@ on:
   push:
     paths:
       - '.github/workflows/publish-source.yml'
+      - 'scripts/patch_v1_9.py'
+      - 'scripts/patch_v1_9_4.py'
+      - 'scripts/patch_v1_9_4_fix.py'
+      - 'scripts/patch_v1_9_5.py'
   workflow_dispatch:
 
 permissions:
@@ -22,14 +26,18 @@ jobs:
       - name: Clone upstream v1.9
         run: git clone --depth 1 --branch 1.9 https://github.com/Loukious/FacebookAppAdsRemover.git /tmp/upstream
 
-      - name: Apply patched v1.9.4 source changes
+      - name: Apply patched v1.9.5 source changes
         run: |
           cp scripts/patch_v1_9.py /tmp/upstream/patch_v1_9.py
           cp scripts/patch_v1_9_4.py /tmp/upstream/patch_v1_9_4.py
+          cp scripts/patch_v1_9_4_fix.py /tmp/upstream/patch_v1_9_4_fix.py
+          cp scripts/patch_v1_9_5.py /tmp/upstream/patch_v1_9_5.py
           cd /tmp/upstream
           python3 patch_v1_9.py
           python3 patch_v1_9_4.py
-          rm -f patch_v1_9.py patch_v1_9_4.py
+          python3 patch_v1_9_4_fix.py
+          python3 patch_v1_9_5.py
+          rm -f patch_v1_9.py patch_v1_9_4.py patch_v1_9_4_fix.py patch_v1_9_5.py
           rm -rf .git
 
       - name: Publish buildable source tree
@@ -47,5 +55,6 @@ jobs:
             echo 'Source tree already current.'
             exit 0
           fi
-          git commit -m '[skip ci] Publish FacebookAppAdsRemover v1.9.4 patched source'
+          git commit -m '[skip ci] Publish FacebookAppAdsRemover v1.9.5 patched source for Facebook 577'
+          git pull --rebase origin main
           git push origin HEAD:main
