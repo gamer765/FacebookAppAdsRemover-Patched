@@ -21,12 +21,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * universal stable-string hooks were written.
  *
  * Keep this layer below the UI/rendering boundary. Facebook reuses several Reels components
- * between ads and organic chrome (including comments), so nulling renderer methods can remove
- * legitimate controls even when a stable component name contains "Ads". The 579 fixes here
- * therefore target only ad request/handoff methods discovered from strong stable markers:
+ * and helper wrappers between ads and organic Reels. Vector logs from exp10 showed the new
+ * one-argument fb_shorts_similar_ad wrapper firing repeatedly on ordinary Reels while comments
+ * were missing, so that wrapper is no longer blocked here. The older zero-arg ad-only resolver
+ * remains in ObfuscationResistantVideoHooks.
  *
+ * Remaining 579 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
- *  - fb_shorts_similar_ad one-argument Object-returning wrapper;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff.
  *
  * XposedBridge.log diagnostics are retained so Vector/LSPosed records installs and hits.
@@ -48,7 +49,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         private val desiredLabels = setOf(
             "reels-query-object-wrapper",
-            "similar-reels-object-wrapper",
             "rti-void-handoff"
         )
 
@@ -147,14 +147,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                             method.returnType == Any::class.java && method.parameterCount in 1..2
                         }
 
-                        installed += installMethodGap(
-                            bridge,
-                            classLoader,
-                            "similar-reels-object-wrapper",
-                            "fb_shorts_similar_ad"
-                        ) { method ->
-                            method.returnType == Any::class.java && method.parameterCount == 1
-                        }
+                        // Intentionally do NOT block the 1-arg fb_shorts_similar_ad wrappers.
+                        // Exp10 Vector logs showed X.Sat.invoke firing on ordinary Reels while
+                        // comments were missing, so this path is shared with normal Reels UI.
 
                         installed += installMethodGap(
                             bridge,
@@ -167,7 +162,8 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
                         xlog(
                             "SCAN reason=$reason attempt=$attempt installed=$installed " +
-                                "labels=${installedLabels.sorted()} rendererBlocking=disabled"
+                                "labels=${installedLabels.sorted()} rendererBlocking=disabled " +
+                                "similarWrapperBlocking=disabled"
                         )
                     }
                 } catch (t: Throwable) {
@@ -214,7 +210,10 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != HOST_PACKAGE) return
 
-        XposedBridge.log("$TAG: MODULE LOADED process=${lpparam.processName} rendererBlocking=disabled")
+        XposedBridge.log(
+            "$TAG: MODULE LOADED process=${lpparam.processName} " +
+                "rendererBlocking=disabled similarWrapperBlocking=disabled"
+        )
         hookDexReadiness(lpparam.classLoader)
         if (!attachHookInstalled.compareAndSet(false, true)) return
 
