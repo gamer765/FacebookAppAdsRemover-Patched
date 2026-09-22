@@ -20,34 +20,80 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Universal fallback for dedicated Reels ad renderers.
  *
- * Facebook 579 introduced additional image/slideshow/multi-ad Reels creatives whose leaf
- * components do not necessarily carry the Reels classification model used by the generic
- * AD/ADS_MIDCARD renderer guard. These components are nevertheless ad-only: their stable
- * component-name strings start with the FbShortsAds family and are never used for organic
- * Reels. Resolve them by those stable strings and suppress only their render entry points.
+ * Facebook 579 contains many ad-only KComponent/Litho renderer families whose leaf components
+ * do not necessarily carry the shared Reels AD/ADS_MIDCARD classification model. Their stable
+ * component-name strings remain unobfuscated, so resolve those strings and suppress only the
+ * corresponding ad-only render entry points.
  *
- * No obfuscated Facebook class or method names are persisted in source. Resolved class names
- * are cached per Facebook build so later launches can install the hooks before the first Reels
- * render, avoiding the cold-start race while remaining resilient to the next X.* reshuffle.
+ * No Facebook X.* class names are hard-coded. Resolved obfuscated classes are cached per host
+ * build so subsequent launches can install hooks before the first Reels render.
  */
 class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
 
     companion object {
         private const val TAG = "FBAdsObfReelsRender"
         private const val HOST_PACKAGE = "com.facebook.katana"
-        private const val PREFS_NAME = "fb_ads_obf_reels_render_targets_v1"
+        private const val PREFS_NAME = "fb_ads_obf_reels_render_targets_v2"
         private const val CACHE_PREFIX = "targets:"
         private const val MAX_SCAN_ATTEMPTS = 10
 
-        private val AD_ONLY_COMPONENT_ANCHORS = linkedMapOf(
-            "FbShortsAdsRootKComponent" to "root",
-            "FbShortsAdsRealTimeIntentComponent" to "rti",
-            "FbShortsAdsPhotoKComponent" to "photo",
-            "FbShortsAdsNativeSlideshowPlayerComponent" to "native-slideshow-player",
-            "FbShortsAdsNativeSlideshowImageComponent" to "native-slideshow-image",
-            "FbShortsAdsMultiAdsGridComponent" to "multiads-grid",
-            "FbShortsAdsMultiAdsVerticalComponent" to "multiads-vertical",
-            "FbShortsAdsMixedMediaCardKComponent" to "mixed-media-card"
+        // Verified in Facebook 579: each stable string below is referenced directly by a
+        // render(ComponentContext) method in an FbShortsAds-only renderer class. This is much
+        // safer than treating generic MIDCARD/PARADE/UGC classifications as ads.
+        private val AD_ONLY_COMPONENT_ANCHORS = linkedSetOf(
+            "FbShortsAdsActionChip",
+            "FbShortsAdsAuthorKComponent",
+            "FbShortsAdsAuthorProfilePictureComponent",
+            "FbShortsAdsAuthorWithFDSComponent",
+            "FbShortsAdsCTAKComponent",
+            "FbShortsAdsCTMEditableEndSceneKComponent",
+            "FbShortsAdsCreativeProductStickerCTAComponent",
+            "FbShortsAdsCreativeStickerImageComponent",
+            "FbShortsAdsDLPProductCardComponent",
+            "FbShortsAdsDirectConversionTouchComponent",
+            "FbShortsAdsDotsCarouselPlayerComponent",
+            "FbShortsAdsHScrollComponent",
+            "FbShortsAdsHscrollAlbumLastCardComponent",
+            "FbShortsAdsHscrollCardComponent",
+            "FbShortsAdsIABReentryMidsceneCardComponent",
+            "FbShortsAdsIABScreenshotEndSceneComponent",
+            "FbShortsAdsLeadGenMCOComponent",
+            "FbShortsAdsLeadGenPIIComponent",
+            "FbShortsAdsMidSceneBizAgentComponent",
+            "FbShortsAdsMidsceneCardComponent",
+            "FbShortsAdsMidsceneContainerComponent",
+            "FbShortsAdsMixedMediaCardKComponent",
+            "FbShortsAdsMultiAdsGridCardComponent",
+            "FbShortsAdsMultiAdsGridComponent",
+            "FbShortsAdsMultiAdsVerticalCardComponent",
+            "FbShortsAdsMultiAdsVerticalComponent",
+            "FbShortsAdsNativeSlideshowImageComponent",
+            "FbShortsAdsNativeSlideshowPlayerComponent",
+            "FbShortsAdsPhotoCardComponent",
+            "FbShortsAdsPhotoInfoChip",
+            "FbShortsAdsPhotoKComponent",
+            "FbShortsAdsPostScrollNudgeBizAiAgentComponent",
+            "FbShortsAdsPostScrollNudgeHscrollCreativeComponent",
+            "FbShortsAdsPostScrollNudgeHscrollCtaComponent",
+            "FbShortsAdsPostScrollNudgeHscrollHeaderComponent",
+            "FbShortsAdsPostScrollNudgeHscrollMetadataCardComponent",
+            "FbShortsAdsPostScrollNudgeMAIComponent",
+            "FbShortsAdsPostScrollNudgeMAIContentCardComponent",
+            "FbShortsAdsPostScrollNudgeMultiImageCollageComponent",
+            "FbShortsAdsPostScrollNudgeScreenShotComponent",
+            "FbShortsAdsPostScrollNudgeScreenShotComponentWithSmoothSwipe",
+            "FbShortsAdsPostScrollNudgeTrustSignalComponent",
+            "FbShortsAdsPostScrollNudgeTrustSignalComponentWithSmoothSwipe",
+            "FbShortsAdsProductExtensionsCard",
+            "FbShortsAdsRealTimeIntentComponent",
+            "FbShortsAdsRootKComponent",
+            "FbShortsAdsRtiSingleCardKComponent",
+            "FbShortsAdsSponsoredSubtitleComponent",
+            "FbShortsAdsStickerCTAComponent",
+            "FbShortsAdsSwipeLeftComponent",
+            "FbShortsAdsTooltipTouchComponent",
+            "FbShortsAdsXAndBrowseProgressRingComponent",
+            "FbShortsAdsXAndBrowseStartingIndicatorComponent"
         )
 
         private val attachHookInstalled = AtomicBoolean(false)
@@ -61,6 +107,11 @@ class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
 
         @Volatile
         private var application: Application? = null
+
+        private fun labelFor(anchor: String): String = anchor
+            .removePrefix("FbShortsAds")
+            .replace(Regex("([a-z0-9])([A-Z])"), "$1-$2")
+            .lowercase()
 
         private fun ensureDexKitLoaded() {
             if (dexKitLoaded.get()) return
@@ -102,15 +153,16 @@ class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
 
             if (method.name == "render") return true
 
-            // Litho/KComponent layout entry points can be obfuscated. Their stable shape is
-            // one non-primitive component-context parameter returning a component object.
+            // KComponent layout entry points can be renamed. On an already ad-only class, a
+            // one-object-parameter/object-return method is a safe fallback shape.
             return method.parameterCount == 1 && !method.parameterTypes[0].isPrimitive
         }
 
-        private fun hookAdOnlyClass(anchor: String, label: String, clazz: Class<*>): Boolean {
+        private fun hookAdOnlyClass(anchor: String, clazz: Class<*>): Boolean {
             val targets = clazz.declaredMethods.filter(::isRenderTarget)
             if (targets.isEmpty()) return false
 
+            val label = labelFor(anchor)
             var newlyHooked = 0
             targets.forEach { method ->
                 if (!hookedMethods.add(method)) return@forEach
@@ -146,12 +198,12 @@ class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
                 val split = encoded.indexOf('|')
                 if (split <= 0 || split == encoded.lastIndex) return@forEach
                 val anchor = encoded.substring(0, split)
-                val label = AD_ONLY_COMPONENT_ANCHORS[anchor] ?: return@forEach
+                if (!AD_ONLY_COMPONENT_ANCHORS.contains(anchor)) return@forEach
                 val className = encoded.substring(split + 1)
                 val clazz = runCatching {
                     Class.forName(className, false, classLoader)
                 }.getOrNull() ?: return@forEach
-                if (hookAdOnlyClass(anchor, label, clazz)) installed++
+                if (hookAdOnlyClass(anchor, clazz)) installed++
             }
 
             if (installed > 0) {
@@ -163,7 +215,7 @@ class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
         @JvmStatic
         fun install(classLoader: ClassLoader, reason: String) {
             application?.let { installCachedTargets(it, classLoader) }
-            if (resolvedAnchors.containsAll(AD_ONLY_COMPONENT_ANCHORS.keys)) return
+            if (resolvedAnchors.containsAll(AD_ONLY_COMPONENT_ANCHORS)) return
             if (scanAttempts.get() >= MAX_SCAN_ATTEMPTS) return
             if (!scanInProgress.compareAndSet(false, true)) return
 
@@ -173,7 +225,7 @@ class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
                     ensureDexKitLoaded()
                     DexKitBridge.create(classLoader, true).use { bridge ->
                         var resolvedNow = 0
-                        AD_ONLY_COMPONENT_ANCHORS.forEach { (anchor, label) ->
+                        AD_ONLY_COMPONENT_ANCHORS.forEach { anchor ->
                             if (resolvedAnchors.contains(anchor)) return@forEach
                             val matches = bridge.findClass {
                                 matcher { usingStrings(anchor) }
@@ -182,7 +234,7 @@ class ObfuscationResistantReelsRendererHooks : IXposedHookLoadPackage {
                                 val clazz = runCatching {
                                     classData.getInstance(classLoader)
                                 }.getOrNull() ?: return@forEach
-                                if (hookAdOnlyClass(anchor, label, clazz)) {
+                                if (hookAdOnlyClass(anchor, clazz)) {
                                     resolvedNow++
                                 }
                             }
