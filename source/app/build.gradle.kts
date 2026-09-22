@@ -11,8 +11,8 @@ android {
         applicationId = "tn.loukious.facebookappadsremover"
         minSdk = 30
         targetSdk = 35
-        versionCode = 20
-        versionName = "1.10.0-obfexp5-fb579-reels"
+        versionCode = 21
+        versionName = "1.10.0-obfexp6-fb579-reels"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -44,5 +44,4 @@ dependencies {
     compileOnly("com.github.deltazefiro:XposedBridge:main-SNAPSHOT")
     implementation("org.luckypray:dexkit:2.0.7")
     implementation(libs.androidx.core.ktx)
-
 }

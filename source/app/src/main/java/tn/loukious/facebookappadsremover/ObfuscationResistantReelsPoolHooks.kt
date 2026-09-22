@@ -18,11 +18,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Supplemental version-independent Reels hooks discovered from Facebook 579.
  *
  * These hooks intentionally use only stable strings and method shape. No X.* class or
- * method names are hard-coded. They address two update-sensitive paths that can escape the
+ * method names are hard-coded. They address update-sensitive paths that can escape the
  * main generic resolver:
  *
  *  - native sponsored stories being inserted into the Reels sponsored pool;
- *  - commercial-break requests whose logging markers were split across methods in 579.
+ *  - commercial-break requests whose logging markers were split across methods in 579;
+ *  - Facebook 579's dedicated multi-ad media runnable, which can prepare a slideshow/grid
+ *    Reels ad before the leaf renderer carries a classifiable AD/ADS_MIDCARD model.
  */
 class ObfuscationResistantReelsPoolHooks : IXposedHookLoadPackage {
 
@@ -36,6 +38,7 @@ class ObfuscationResistantReelsPoolHooks : IXposedHookLoadPackage {
         private val scanInProgress = AtomicBoolean(false)
         private val sponsoredPoolInstalled = AtomicBoolean(false)
         private val commercialBreakInstalled = AtomicBoolean(false)
+        private val multiAdsMediaInstalled = AtomicBoolean(false)
         private val hookedMethods: MutableSet<Method> = Collections.synchronizedSet(HashSet())
 
         private fun ensureDexKitLoaded() {
@@ -103,9 +106,36 @@ class ObfuscationResistantReelsPoolHooks : IXposedHookLoadPackage {
             return count
         }
 
+        private fun installMultiAdsMediaBlock(bridge: DexKitBridge, classLoader: ClassLoader): Int {
+            if (multiAdsMediaInstalled.get()) return 0
+            var count = 0
+            val results = bridge.findMethod {
+                matcher {
+                    // Facebook 579 dedicated Reels multi-ad media path. APK analysis shows
+                    // this marker on a zero-arg runnable tied to the NativeSlideshow/MultiAds
+                    // creative family. It is ad-specific, so blocking it does not require
+                    // broadening the shared Reels classifier to MIDCARD/PARADE/UGC.
+                    usingStrings("fb_reels_facebook_reels_multiads_media")
+                    returnType = "void"
+                    paramCount = 0
+                }
+            }
+            results.forEach { methodData ->
+                val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+                    ?: return@forEach
+                if (hookMethod("reels-multiads-media", method)) count++
+            }
+            if (count > 0) multiAdsMediaInstalled.set(true)
+            return count
+        }
+
         @JvmStatic
         fun install(classLoader: ClassLoader, reason: String) {
-            if (sponsoredPoolInstalled.get() && commercialBreakInstalled.get()) return
+            if (
+                sponsoredPoolInstalled.get() &&
+                commercialBreakInstalled.get() &&
+                multiAdsMediaInstalled.get()
+            ) return
             if (!scanInProgress.compareAndSet(false, true)) return
             Thread({
                 try {
@@ -113,9 +143,11 @@ class ObfuscationResistantReelsPoolHooks : IXposedHookLoadPackage {
                     DexKitBridge.create(classLoader, true).use { bridge ->
                         val sponsored = installSponsoredPoolBlock(bridge, classLoader)
                         val commercial = installCommercialBreakBlock(bridge, classLoader)
+                        val multiAds = installMultiAdsMediaBlock(bridge, classLoader)
                         Log.i(
                             TAG,
-                            "scan reason=$reason sponsoredPool=$sponsored commercialBreak=$commercial"
+                            "scan reason=$reason sponsoredPool=$sponsored " +
+                                "commercialBreak=$commercial multiAdsMedia=$multiAds"
                         )
                     }
                 } catch (t: Throwable) {
