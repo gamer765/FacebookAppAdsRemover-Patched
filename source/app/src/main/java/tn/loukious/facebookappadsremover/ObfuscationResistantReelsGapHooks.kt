@@ -92,7 +92,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         private fun hookBlocked(label: String, method: Method): Boolean {
             if (!hookedMethods.add(method)) return false
             method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook() {
+            // Run before the older renderer/request hooks. Some of those set result early,
+            // which can stop later callbacks and hide diagnostics from Vector/LSPosed.
+            XposedBridge.hookMethod(method, object : XC_MethodHook(10000) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     xlog("HIT $label ${method.declaringClass.name}.${method.name}")
                     param.result = safeResult(method)
