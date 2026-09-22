@@ -21,12 +21,16 @@ import java.util.concurrent.atomic.AtomicInteger
  * Facebook 579 follow-up for Reels ad paths that changed shape after the original universal
  * stable-string hooks were written.
  *
- * This layer deliberately avoids X.* names. It fills three concrete gaps observed in the 579
- * DEX and adds LSPosed-native diagnostics so Vector captures installs/hits:
+ * This layer deliberately avoids X.* names. It fills concrete gaps observed in the 579 DEX
+ * and adds LSPosed-native diagnostics so Vector captures installs/hits:
  *
  *  - reels_ad_query_send now also appears on Object-returning lambda/coroutine wrappers;
  *  - fb_shorts_similar_ad gained a one-argument Object-returning wrapper;
  *  - Reels banner ads use ReelsBannerAdsComponent, outside the FbShortsAds* renderer family.
+ *
+ * ReelsAdsCaptionCommentComponent is intentionally NOT blocked. Despite the Ads name, Facebook
+ * reuses it for normal Reels caption/comment UI; suppressing it removes comments from organic
+ * Reels. Keep shared UI components out of the fail-closed renderer list.
  */
 class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
@@ -46,9 +50,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         // A small set of critical ad-only renderers is repeated here intentionally. The main
         // renderer layer still owns the full list; these duplicates give us XposedBridge logs
         // for the most important paths in Vector and act as a second fail-closed guard.
+        // Do not add shared caption/comment chrome here even if its stable name contains "Ads".
         private val TRACE_RENDER_ANCHORS = linkedMapOf(
             "ReelsBannerAdsComponent" to "banner-ads",
-            "ReelsAdsCaptionCommentComponent" to "ads-caption-comment",
             "FbShortsAdsRootKComponent" to "fbshorts-root",
             "FbShortsAdsNativeSlideshowImageComponent" to "native-slideshow-image",
             "FbShortsAdsMultiAdsGridComponent" to "multiads-grid",
