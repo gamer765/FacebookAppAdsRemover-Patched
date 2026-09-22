@@ -11,26 +11,25 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.luckypray.dexkit.DexKitBridge
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Facebook 579 follow-up for Reels ad paths that changed shape after the original universal
- * stable-string hooks were written.
+ * Facebook 579 follow-up for Reels ad request paths that changed shape after the original
+ * universal stable-string hooks were written.
  *
- * This layer deliberately avoids X.* names. It fills concrete gaps observed in the 579 DEX
- * and adds LSPosed-native diagnostics so Vector captures installs/hits:
+ * Keep this layer below the UI/rendering boundary. Facebook reuses several Reels components
+ * between ads and organic chrome (including comments), so nulling renderer methods can remove
+ * legitimate controls even when a stable component name contains "Ads". The 579 fixes here
+ * therefore target only ad request/handoff methods discovered from strong stable markers:
  *
- *  - reels_ad_query_send now also appears on Object-returning lambda/coroutine wrappers;
- *  - fb_shorts_similar_ad gained a one-argument Object-returning wrapper;
- *  - Reels banner ads use ReelsBannerAdsComponent, outside the FbShortsAds* renderer family.
+ *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
+ *  - fb_shorts_similar_ad one-argument Object-returning wrapper;
+ *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff.
  *
- * ReelsAdsCaptionCommentComponent is intentionally NOT blocked. Despite the Ads name, Facebook
- * reuses it for normal Reels caption/comment UI; suppressing it removes comments from organic
- * Reels. Keep shared UI components out of the fail-closed renderer list.
+ * XposedBridge.log diagnostics are retained so Vector/LSPosed records installs and hits.
  */
 class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
@@ -47,18 +46,10 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         private val hookedMethods: MutableSet<Method> = Collections.synchronizedSet(HashSet())
         private val installedLabels: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-        // A small set of critical ad-only renderers is repeated here intentionally. The main
-        // renderer layer still owns the full list; these duplicates give us XposedBridge logs
-        // for the most important paths in Vector and act as a second fail-closed guard.
-        // Do not add shared caption/comment chrome here even if its stable name contains "Ads".
-        private val TRACE_RENDER_ANCHORS = linkedMapOf(
-            "ReelsBannerAdsComponent" to "banner-ads",
-            "FbShortsAdsRootKComponent" to "fbshorts-root",
-            "FbShortsAdsNativeSlideshowImageComponent" to "native-slideshow-image",
-            "FbShortsAdsMultiAdsGridComponent" to "multiads-grid",
-            "FbShortsAdsMultiAdsVerticalComponent" to "multiads-vertical",
-            "FbShortsAdsPhotoKComponent" to "photo",
-            "FbShortsAdsMixedMediaCardKComponent" to "mixed-media"
+        private val desiredLabels = setOf(
+            "reels-query-object-wrapper",
+            "similar-reels-object-wrapper",
+            "rti-void-handoff"
         )
 
         private fun xlog(message: String) {
@@ -94,10 +85,11 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         }
 
         private fun hookBlocked(label: String, method: Method): Boolean {
-            if (!hookedMethods.add(method)) return false
+            if (!hookedMethods.add(method)) {
+                installedLabels.add(label)
+                return false
+            }
             method.isAccessible = true
-            // Run before the older renderer/request hooks. Some of those set result early,
-            // which can stop later callbacks and hide diagnostics from Vector/LSPosed.
             XposedBridge.hookMethod(method, object : XC_MethodHook(10000) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     xlog("HIT $label ${method.declaringClass.name}.${method.name}")
@@ -133,36 +125,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             return count
         }
 
-        private fun isRenderTarget(method: Method): Boolean {
-            if (Modifier.isStatic(method.modifiers) || method.isSynthetic || method.isBridge) return false
-            if (method.returnType == Void.TYPE || method.returnType.isPrimitive) return false
-            if (method.returnType == String::class.java) return false
-            if (method.name == "render") return true
-            return method.parameterCount == 1 && !method.parameterTypes[0].isPrimitive
-        }
-
-        private fun installRendererTrace(
-            bridge: DexKitBridge,
-            classLoader: ClassLoader,
-            anchor: String,
-            label: String
-        ): Int {
-            var count = 0
-            val classes = bridge.findClass {
-                matcher { usingStrings(anchor) }
-            }
-            classes.forEach { classData ->
-                val clazz = runCatching { classData.getInstance(classLoader) }.getOrNull()
-                    ?: return@forEach
-                clazz.declaredMethods.filter(::isRenderTarget).forEach { method ->
-                    if (hookBlocked("renderer-$label", method)) count++
-                }
-            }
-            return count
-        }
-
         @JvmStatic
         fun install(classLoader: ClassLoader, reason: String) {
+            if (installedLabels.containsAll(desiredLabels)) return
             if (scanAttempts.get() >= MAX_SCAN_ATTEMPTS) return
             if (!scanInProgress.compareAndSet(false, true)) return
             val attempt = scanAttempts.incrementAndGet()
@@ -173,7 +138,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     DexKitBridge.create(classLoader, true).use { bridge ->
                         var installed = 0
 
-                        // 579: two new non-void dispatch wrappers carry reels_ad_query_send.
                         installed += installMethodGap(
                             bridge,
                             classLoader,
@@ -183,8 +147,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                             method.returnType == Any::class.java && method.parameterCount in 1..2
                         }
 
-                        // 579: similar-Reels ads gained a Function1-style wrapper. The older
-                        // universal rule only covered zero-arg Object builders.
                         installed += installMethodGap(
                             bridge,
                             classLoader,
@@ -194,8 +156,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                             method.returnType == Any::class.java && method.parameterCount == 1
                         }
 
-                        // 579 also has a void RTI handoff on the same strong ad-only marker;
-                        // the original universal rule only covered the zero-arg Object builder.
                         installed += installMethodGap(
                             bridge,
                             classLoader,
@@ -205,13 +165,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                             method.returnType == Void.TYPE && method.parameterCount == 1
                         }
 
-                        TRACE_RENDER_ANCHORS.forEach { (anchor, label) ->
-                            installed += installRendererTrace(bridge, classLoader, anchor, label)
-                        }
-
                         xlog(
                             "SCAN reason=$reason attempt=$attempt installed=$installed " +
-                                "labels=${installedLabels.sorted()}"
+                                "labels=${installedLabels.sorted()} rendererBlocking=disabled"
                         )
                     }
                 } catch (t: Throwable) {
@@ -237,7 +193,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         XposedBridge.hookMethod(method, object : XC_MethodHook() {
                             override fun afterHookedMethod(param: MethodHookParam) {
                                 val configuredLoader = (param.thisObject as? ClassLoader) ?: classLoader
-                                xlog("Facebook MultiDex configured; rescanning")
+                                xlog("Facebook MultiDex configured; rescanning request gaps")
                                 install(configuredLoader, "MultiDex.configure")
                             }
                         })
@@ -258,7 +214,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != HOST_PACKAGE) return
 
-        XposedBridge.log("$TAG: MODULE LOADED process=${lpparam.processName}")
+        XposedBridge.log("$TAG: MODULE LOADED process=${lpparam.processName} rendererBlocking=disabled")
         hookDexReadiness(lpparam.classLoader)
         if (!attachHookInstalled.compareAndSet(false, true)) return
 
@@ -267,7 +223,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         XposedBridge.hookMethod(attach, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 val app = param.thisObject as? Application ?: return
-                xlog("Application attached version-gap hooks active")
+                xlog("Application attached version-gap request hooks active")
                 scheduleRetries(app.classLoader)
             }
         })
