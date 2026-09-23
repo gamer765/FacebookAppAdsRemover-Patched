@@ -73,17 +73,45 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             }
         }
 
-        private fun safeResult(method: Method): Any? = when (method.returnType) {
-            Void.TYPE -> null
-            java.lang.Boolean.TYPE -> false
-            java.lang.Byte.TYPE -> 0.toByte()
-            java.lang.Character.TYPE -> '\u0000'
-            java.lang.Short.TYPE -> 0.toShort()
-            java.lang.Integer.TYPE -> 0
-            java.lang.Long.TYPE -> 0L
-            java.lang.Float.TYPE -> 0f
-            java.lang.Double.TYPE -> 0.0
-            else -> null
+        private fun immediateNoAdFuture(method: Method): Any? {
+            if (method.returnType.name != "com.google.common.util.concurrent.ListenableFuture") return null
+            return runCatching {
+                val futures = Class.forName(
+                    "com.google.common.util.concurrent.Futures",
+                    false,
+                    method.declaringClass.classLoader
+                )
+                val immediateFuture = futures.getDeclaredMethod("immediateFuture", Any::class.java)
+                immediateFuture.isAccessible = true
+                immediateFuture.invoke(null, null)
+            }.onFailure {
+                xlog(
+                    "Unable to create completed no-ad future for " +
+                        "${method.declaringClass.name}.${method.name}",
+                    it
+                )
+            }.getOrNull()
+        }
+
+        private fun safeResult(label: String, method: Method): Any? {
+            if (
+                label == "fbfetch-reels-video-ads-query" &&
+                method.returnType.name == "com.google.common.util.concurrent.ListenableFuture"
+            ) {
+                immediateNoAdFuture(method)?.let { return it }
+            }
+            return when (method.returnType) {
+                Void.TYPE -> null
+                java.lang.Boolean.TYPE -> false
+                java.lang.Byte.TYPE -> 0.toByte()
+                java.lang.Character.TYPE -> '\u0000'
+                java.lang.Short.TYPE -> 0.toShort()
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                java.lang.Float.TYPE -> 0f
+                java.lang.Double.TYPE -> 0.0
+                else -> null
+            }
         }
 
         private fun hookBlocked(label: String, method: Method): Boolean {
@@ -94,8 +122,14 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             method.isAccessible = true
             XposedBridge.hookMethod(method, object : XC_MethodHook(10000) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    xlog("HIT $label ${method.declaringClass.name}.${method.name}")
-                    param.result = safeResult(method)
+                    val result = safeResult(label, method)
+                    val resultMode = if (
+                        label == "fbfetch-reels-video-ads-query" &&
+                        method.returnType.name == "com.google.common.util.concurrent.ListenableFuture" &&
+                        result != null
+                    ) "completed-no-ad-future" else "safe-default"
+                    xlog("HIT $label ${method.declaringClass.name}.${method.name} result=$resultMode")
+                    param.result = result
                 }
             })
             installedLabels.add(label)
