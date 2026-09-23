@@ -338,17 +338,20 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                                 XposedBridge.hookMethod(method, object : XC_MethodHook(20_000) {
                                     override fun beforeHookedMethod(param: MethodHookParam) {
                                         val hits = markerHits.computeIfAbsent(marker) { AtomicInteger(0) }.incrementAndGet()
-                                        // Shared markers such as fb_shorts_similar_ad are noisy; retain enough
-                                        // events for correlation but do not drown Vector indefinitely.
-                                        if (hits <= 30 || hits % 25 == 0) {
-                                            val args = param.args.take(6).joinToString(",") { arg ->
-                                                val cls = classifier?.modelClassification(arg)
-                                                "${arg?.javaClass?.name ?: "null"}${cls?.let { "=$it" } ?: ""}"
-                                            }
-                                            val detail =
-                                                "MARKER[$marker] hit=$hits ${method.declaringClass.name}.${method.name} " +
-                                                    "args=[$args] stack=${shortStack(0, 9)}"
-                                            if (marker == "fb_shorts_similar_ad") event(detail) else signal(detail)
+                                        val args = param.args.take(6).joinToString(",") { arg ->
+                                            val cls = classifier?.modelClassification(arg)
+                                            "${arg?.javaClass?.name ?: "null"}${cls?.let { "=$it" } ?: ""}"
+                                        }
+                                        val detail =
+                                            "MARKER[$marker] hit=$hits ${method.declaringClass.name}.${method.name} " +
+                                                "args=[$args] stack=${shortStack(0, 9)}"
+                                        // fb_shorts_similar_ad is known to be shared with ordinary Reels/comments,
+                                        // so keep only that marker sampled. Strong ad-specific markers must remain
+                                        // visible on every hit even many hours into the process.
+                                        if (marker == "fb_shorts_similar_ad") {
+                                            if (hits <= 30 || hits % 25 == 0) event(detail)
+                                        } else {
+                                            signal(detail)
                                         }
                                     }
                                 })
