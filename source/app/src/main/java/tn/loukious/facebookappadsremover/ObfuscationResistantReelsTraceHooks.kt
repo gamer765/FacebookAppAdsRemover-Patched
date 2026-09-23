@@ -38,7 +38,8 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
         private const val HOST_PACKAGE = "com.facebook.katana"
         private const val REELS_CACHE_FILE = "fbar_reels_guard_cache.properties"
         private const val MAX_SCAN_ATTEMPTS = 10
-        private const val NORMAL_EVENT_FIRST = 40\n        private const val NORMAL_EVENT_EVERY = 250
+        private const val NORMAL_EVENT_FIRST = 40
+        private const val NORMAL_EVENT_EVERY = 250
 
         private val attachHookInstalled = AtomicBoolean(false)
         private val dexReadyHookInstalled = AtomicBoolean(false)
