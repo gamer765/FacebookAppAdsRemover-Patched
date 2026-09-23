@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * remains in ObfuscationResistantVideoHooks.
  *
  * Remaining 579 gap blocks:
+ *  - FBFetchReelsVideoAdsQuery methods whose signature changed from the old void dispatcher;
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff.
  *
@@ -48,6 +49,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         private val installedLabels: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
         private val desiredLabels = setOf(
+            "fbfetch-reels-video-ads-query",
             "reels-query-object-wrapper",
             "rti-void-handoff"
         )
@@ -137,6 +139,20 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     ensureDexKitLoaded()
                     DexKitBridge.create(classLoader, true).use { bridge ->
                         var installed = 0
+
+                        // Facebook 579 leak captured by exp13:
+                        // FBFetchReelsVideoAdsQuery -> X.7K0.A07 -> visible "Ad" Reel about
+                        // 20 seconds later. The older resolver required the v576/v577
+                        // void + reels_ad_query_send shape, so this changed method escaped.
+                        // The marker itself names a dedicated Reels video-ad GraphQL query,
+                        // so block every non-constructor method carrying it regardless of
+                        // the obfuscated method's changed return type / parameter count.
+                        installed += installMethodGap(
+                            bridge,
+                            classLoader,
+                            "fbfetch-reels-video-ads-query",
+                            "FBFetchReelsVideoAdsQuery"
+                        ) { _ -> true }
 
                         installed += installMethodGap(
                             bridge,
