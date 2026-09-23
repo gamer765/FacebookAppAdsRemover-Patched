@@ -2910,7 +2910,14 @@ private fun installReelsInstreamAdBlock(classLoader: ClassLoader, bridge: DexKit
 }
 
 // Server classification values that mark a reel item as an ad.
-private val AD_CLASSIFICATION_VALUES = setOf("AD", "ADS_MIDCARD")
+private val AD_CLASSIFICATION_VALUES = setOf(
+    "AD",
+    "ADS_MIDCARD",
+    // Facebook 579: two independently captured visible Reels ads reached the
+    // viewer with this classifier value and then rendered an accessibility
+    // label of "Ad". Organic Reels observed in the same sessions were UGC.
+    "UNSET_OR_UNRECOGNIZED_ENUM_VALUE"
+)
 
 // Debug-only: renderables whose model carries a classification outside the
 // blocklist (e.g. MIDCARD/PARADE/UGC) pass straight through the render block.
