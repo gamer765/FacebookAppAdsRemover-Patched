@@ -28,7 +28,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Remaining 579 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
- *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff.
+ *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
+ *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false.
  *
  * FBFetchReelsVideoAdsQuery is intentionally NOT blocked: in v579 its A07 path returns
  * an async future, and forcing null leaves Reels playback stuck after the "ad starting"
@@ -53,7 +54,8 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         private val desiredLabels = setOf(
             "reels-query-object-wrapper",
-            "rti-void-handoff"
+            "rti-void-handoff",
+            "reels-content-video-ad-state-gate"
         )
 
         private fun xlog(message: String) {
@@ -142,6 +144,52 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             return true
         }
 
+        private fun installStateGate(
+            bridge: DexKitBridge,
+            classLoader: ClassLoader
+        ): Int {
+            var count = 0
+            val results = bridge.findMethod {
+                matcher { usingStrings("ReelsVddLayout::commentBarStateChange") }
+            }
+            results.forEach { methodData ->
+                val method = runCatching { methodData.getMethodInstance(classLoader) }.getOrNull()
+                    ?: return@forEach
+                if (method.name == "<init>" || method.name == "<clinit>") return@forEach
+                val params = method.parameterTypes
+                if (
+                    method.returnType != Void.TYPE ||
+                    params.size != 6 ||
+                    params[3] != java.lang.Boolean.TYPE ||
+                    params[4] != java.lang.Boolean.TYPE ||
+                    params[5] != java.lang.Boolean.TYPE
+                ) return@forEach
+                if (!hookedMethods.add(method)) {
+                    installedLabels.add("reels-content-video-ad-state-gate")
+                    return@forEach
+                }
+                method.isAccessible = true
+                XposedBridge.hookMethod(method, object : XC_MethodHook(10000) {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (param.args.getOrNull(5) == true) {
+                            xlog(
+                                "HIT reels-content-video-ad-state-gate " +
+                                    "${method.declaringClass.name}.${method.name} forcing isPlayingInContentVideoAd=false"
+                            )
+                            param.args[5] = false
+                        }
+                    }
+                })
+                installedLabels.add("reels-content-video-ad-state-gate")
+                xlog(
+                    "INSTALLED reels-content-video-ad-state-gate " +
+                        "${method.declaringClass.name}.${method.name} params=${method.parameterCount}"
+                )
+                count++
+            }
+            return count
+        }
+
         private fun installMethodGap(
             bridge: DexKitBridge,
             classLoader: ClassLoader,
@@ -203,6 +251,14 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         ) { method ->
                             method.returnType == Void.TYPE && method.parameterCount == 1
                         }
+
+                        // Facebook 579 in-content Reel ads transition the current organic
+                        // Reel into ad mode through ReelsVddLayout::commentBarStateChange.
+                        // The method's final boolean maps directly to CommentBarState's
+                        // isPlayingInContentVideoAd field. Force only that flag false so
+                        // the organic Reel remains active while downstream ad filtering
+                        // discards the ad payload.
+                        installed += installStateGate(bridge, classLoader)
 
                         xlog(
                             "SCAN reason=$reason attempt=$attempt installed=$installed " +
