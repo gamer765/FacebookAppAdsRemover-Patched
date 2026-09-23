@@ -12,7 +12,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = 31
-        versionName = "1.10.0-obfexp16-fb579-futurefix"
+        versionName = "1.10.0-obfexp16-fb579-statefix"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
