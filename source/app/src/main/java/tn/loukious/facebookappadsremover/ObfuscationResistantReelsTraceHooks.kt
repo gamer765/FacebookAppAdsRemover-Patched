@@ -349,8 +349,13 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                                         // fb_shorts_similar_ad is known to be shared with ordinary Reels/comments,
                                         // so keep only that marker sampled. Strong ad-specific markers must remain
                                         // visible on every hit even many hours into the process.
-                                        if (marker == "fb_shorts_similar_ad") {
-                                            if (hits <= 30 || hits % 25 == 0) event(detail)
+                                        if (
+                                            marker == "fb_shorts_similar_ad" ||
+                                            marker == "after_model_added_to_pool"
+                                        ) {
+                                            // Both markers are referenced by shared helper/string-table paths
+                                            // in v579 and can fire hundreds of times on ordinary Reels.
+                                            if (hits <= 30 || hits % 100 == 0) event(detail)
                                         } else {
                                             signal(detail)
                                         }
