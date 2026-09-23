@@ -38,7 +38,7 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
         private const val HOST_PACKAGE = "com.facebook.katana"
         private const val REELS_CACHE_FILE = "fbar_reels_guard_cache.properties"
         private const val MAX_SCAN_ATTEMPTS = 10
-        private const val MAX_VECTOR_EVENTS = 700
+        private const val NORMAL_EVENT_FIRST = 40\n        private const val NORMAL_EVENT_EVERY = 250
 
         private val attachHookInstalled = AtomicBoolean(false)
         private val dexReadyHookInstalled = AtomicBoolean(false)
@@ -46,7 +46,7 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
         private val dexKitLoaded = AtomicBoolean(false)
         private val scanInProgress = AtomicBoolean(false)
         private val scanAttempts = AtomicInteger(0)
-        private val vectorEvents = AtomicInteger(0)
+        private val normalEvents = AtomicInteger(0)
         private val cacheLogged = AtomicBoolean(false)
 
         private val hookedPagerMethods: MutableSet<Method> = Collections.synchronizedSet(HashSet())
@@ -83,13 +83,21 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
         }
 
         private fun event(message: String) {
-            val n = vectorEvents.incrementAndGet()
-            if (n <= MAX_VECTOR_EVENTS) {
+            val n = normalEvents.incrementAndGet()
+            if (n <= NORMAL_EVENT_FIRST || n % NORMAL_EVENT_EVERY == 0) {
                 xlog("E$n $message")
-            } else if (n == MAX_VECTOR_EVENTS + 1) {
-                xlog("event limit reached ($MAX_VECTOR_EVENTS); further trace events suppressed")
             }
         }
+
+        // High-value ad evidence is never globally suppressed. This is intentionally
+        // separate from event(): exp12 exhausted its 700-event budget on ordinary UGC
+        // within about one minute, leaving no diagnostics hours later when an ad leaked.
+        private fun signal(message: String) {
+            xlog("SIGNAL $message")
+        }
+
+        private fun isInterestingClassification(value: String?): Boolean =
+            value != null && value != "UGC"
 
         private fun shortStack(skip: Int = 0, max: Int = 10): String = Throwable().stackTrace
             .drop(2 + skip)
@@ -168,10 +176,10 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                             }
                         }
                     }
-                    event(
+                    val detail =
                         "PAGER ${method.declaringClass.name}.${method.name} wrappers=$wrapperCount " +
                             "items=$itemCount classifications=$classifications sample=[${sample.joinToString(", ")}]"
-                    )
+                    if (classifications.keys.any(::isInterestingClassification)) signal(detail) else event(detail)
                 }
             })
             xlog("INSTALLED pager trace ${method.declaringClass.name}.${method.name}")
@@ -186,7 +194,10 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (param.throwable != null) return
                     val list = param.result as? Iterable<*> ?: return
-                    event("SNAPSHOT ${method.declaringClass.name}.${method.name} ${summarizeItems(list, localClassifier)}")
+                    val summary = summarizeItems(list, localClassifier)
+                    val values = list.mapNotNull { localClassifier?.classificationOf(it) }.toSet()
+                    val detail = "SNAPSHOT ${method.declaringClass.name}.${method.name} $summary"
+                    if (values.any(::isInterestingClassification)) signal(detail) else event(detail)
                 }
             })
             xlog("INSTALLED snapshot trace ${method.declaringClass.name}.${method.name}")
@@ -219,7 +230,12 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                                 }
                             current = current.superclass
                         }
-                        event("RENDER ${clazz.name}.${method.name} models=[${details.joinToString(", ")}]")
+                        val detail = "RENDER ${clazz.name}.${method.name} models=[${details.joinToString(", ")}]"
+                        if (details.any { d -> !d.endsWith("=UGC") }) {
+                            if (details.isNotEmpty()) signal(detail) else event(detail)
+                        } else {
+                            event(detail)
+                        }
                     }
                 })
                 xlog("INSTALLED render trace ${clazz.name}.${method.name}")
@@ -329,10 +345,10 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                                                 val cls = classifier?.modelClassification(arg)
                                                 "${arg?.javaClass?.name ?: "null"}${cls?.let { "=$it" } ?: ""}"
                                             }
-                                            event(
+                                            val detail =
                                                 "MARKER[$marker] hit=$hits ${method.declaringClass.name}.${method.name} " +
                                                     "args=[$args] stack=${shortStack(0, 9)}"
-                                            )
+                                            if (marker == "fb_shorts_similar_ad") event(detail) else signal(detail)
                                         }
                                     }
                                 })
@@ -373,7 +389,7 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                                     parents.add(parent!!.javaClass.name)
                                     parent = parent!!.parent
                                 }
-                                event("UI-TEXT text=${text.take(80)} view=${view?.javaClass?.name} parents=$parents stack=${shortStack(0, 10)}")
+                                signal("UI-TEXT text=${text.take(80)} view=${view?.javaClass?.name} parents=$parents stack=${shortStack(0, 10)}")
                             }
                         })
                     }
@@ -385,7 +401,7 @@ class ObfuscationResistantReelsTraceHooks : IXposedHookLoadPackage {
                         val lower = text.lowercase()
                         if (!lower.contains("sponsored") && lower != "ad" && !lower.contains("ad choices")) return
                         val view = param.thisObject as? View
-                        event("UI-A11Y text=${text.take(120)} view=${view?.javaClass?.name} stack=${shortStack(0, 10)}")
+                        signal("UI-A11Y text=${text.take(120)} view=${view?.javaClass?.name} stack=${shortStack(0, 10)}")
                     }
                 })
                 xlog("INSTALLED framework Sponsored/ad text probes")
