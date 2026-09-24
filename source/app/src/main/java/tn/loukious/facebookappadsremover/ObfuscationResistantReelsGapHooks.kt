@@ -29,7 +29,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Remaining 579 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
- *  - Facebook 579 in-content-ad state listener: convert A0B/A09 enter-ad events into an explicit normal-state publication;
+ *  - Facebook 579 CZQ state event: clear pause-ad/player-block/overlay-hide flags before broadcast;
+ *  - Facebook 579 in-content-ad state listener: convert A0B/A09 enter-ad events into an explicit normal-state publication as fallback;
  *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false as fallback.
  *
  * FBFetchReelsVideoAdsQuery is intentionally NOT blocked: in v579 its A07 path returns
@@ -57,7 +58,8 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             "reels-query-object-wrapper",
             "rti-void-handoff",
             "reels-content-video-ad-state-gate",
-            "reels-content-video-ad-state-listener"
+            "reels-content-video-ad-state-listener",
+            "reels-ad-state-event-sanitizer"
         )
 
         private fun xlog(message: String) {
@@ -144,6 +146,118 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     " params=${method.parameterCount} return=${method.returnType.name}"
             )
             return true
+        }
+
+        private fun installAdStateEventSanitizer(classLoader: ClassLoader): Int {
+            // Facebook 579 builds CZQ(state, playerOrigin, bool) in X.5U9.A1o and
+            // broadcasts that state to multiple listeners. By the time B94.AuA
+            // runs, other listeners may already have consumed flags that pause the
+            // organic Reel or hide its overlay. Sanitize the ad-state snapshot at
+            // construction time so every downstream listener sees a normal state.
+            val eventClass = runCatching { Class.forName("X.CZQ", false, classLoader) }.getOrNull()
+                ?: return 0
+            val stateClass = runCatching { Class.forName("X.555", false, classLoader) }.getOrNull()
+                ?: return 0
+            val keyClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
+                ?: return 0
+
+            val ctor = eventClass.declaredConstructors.firstOrNull { candidate ->
+                val p = candidate.parameterTypes
+                p.size == 3 &&
+                    p[0] == stateClass &&
+                    p[2] == java.lang.Boolean.TYPE
+            }?.apply { isAccessible = true } ?: return 0
+
+            val stateMapField = runCatching {
+                stateClass.getDeclaredField("A00").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateCtor = stateClass.declaredConstructors.firstOrNull { candidate ->
+                val p = candidate.parameterTypes
+                p.size == 1 && java.util.Map::class.java.isAssignableFrom(p[0])
+            }?.apply { isAccessible = true } ?: return 0
+
+            val classifierA0B = runCatching {
+                keyClass.getDeclaredField("A0B").apply { isAccessible = true }.get(null)
+            }.getOrNull() ?: return 0
+            val classifierA09 = runCatching {
+                keyClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
+            }.getOrNull() ?: return 0
+
+            val statePredicate = runCatching {
+                val helperClass = Class.forName("X.9dO", false, classLoader)
+                helperClass.declaredMethods.firstOrNull { candidate ->
+                    candidate.name == "A1X" &&
+                        candidate.returnType == java.lang.Boolean.TYPE &&
+                        candidate.parameterTypes.size == 2 &&
+                        candidate.parameterTypes[0] == keyClass &&
+                        candidate.parameterTypes[1] == stateClass
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+
+            // These are the exact v579 state keys whose names describe the residual
+            // behavior seen after the visible ad was suppressed.
+            val falseKeyNames = listOf(
+                "A05", // hasPostRollAd
+                "A06", // isBlockingVideo
+                "A08", // isInContentAdsBannerOrDeferredCardVisible
+                "A09", // isPlayerControlBlocked
+                "A0B", // isPlayingVideo (the ad/player state used by B94)
+                "A0F", // shouldHideAllOrganicChromeForPauseAd
+                "A0G", // shouldHideAllOrganicMetadata
+                "A0H", // shouldHideHostVideoOverlay
+                "A0I", // shouldHideOrganicDescription
+                "A0J", // shouldHideOrganicEyebrow
+                "A0K", // shouldHideOrganicHScrollAugment
+                "A0M", // shouldMoveControllerToFooter
+                "A0P"  // shouldStopLoopingHostVideo
+            )
+            val falseKeys = falseKeyNames.mapNotNull { name ->
+                runCatching {
+                    keyClass.getDeclaredField(name).apply { isAccessible = true }.get(null)
+                }.getOrNull()
+            }
+            if (falseKeys.size != falseKeyNames.size) return 0
+
+            XposedBridge.hookMethod(ctor, object : XC_MethodHook(10000) {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val state = param.args.getOrNull(0) ?: return
+
+                    val matchesA0B = runCatching {
+                        statePredicate.invoke(null, classifierA0B, state) as? Boolean
+                    }.getOrNull() == true
+                    val matchesA09 = if (!matchesA0B) {
+                        runCatching {
+                            statePredicate.invoke(null, classifierA09, state) as? Boolean
+                        }.getOrNull() == true
+                    } else false
+                    if (!matchesA0B && !matchesA09) return
+
+                    val originalMap = runCatching {
+                        @Suppress("UNCHECKED_CAST")
+                        stateMapField.get(state) as? Map<Any?, Any?>
+                    }.getOrNull() ?: return
+
+                    val sanitized = HashMap<Any?, Any?>(originalMap)
+                    falseKeys.forEach { key -> sanitized[key] = false }
+
+                    val replacement = runCatching {
+                        stateCtor.newInstance(sanitized)
+                    }.onFailure {
+                        xlog("Failed to construct sanitized Reels state", it)
+                    }.getOrNull() ?: return
+
+                    param.args[0] = replacement
+                    xlog(
+                        "HIT reels-ad-state-event-sanitizer " +
+                            "CZQ state=${if (matchesA0B) "A0B" else "A09"} " +
+                            "cleared=postRoll|blocking|controls|adBanner|pauseChrome|overlay|stopLoop"
+                    )
+                }
+            })
+
+            installedLabels.add("reels-ad-state-event-sanitizer")
+            xlog("INSTALLED reels-ad-state-event-sanitizer X.CZQ.<init>")
+            return 1
         }
 
         private fun installContentAdStateListenerBlock(classLoader: ClassLoader): Int {
@@ -451,6 +565,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         // isPlayingInContentVideoAd field. Force only that flag false so
                         // the organic Reel remains active while downstream ad filtering
                         // discards the ad payload.
+                        installed += installAdStateEventSanitizer(classLoader)
                         installed += installContentAdStateListenerBlock(classLoader)
                         installed += installStateGate(bridge, classLoader)
 
