@@ -209,8 +209,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             //   }
             //
             // Exp18 returned from AuA for every callback, which also swallowed the
-            // false/cleanup transitions. Mirror Facebook's own condition here and
-            // suppress ONLY the two states that would set enteringAd=true.
+            // false/cleanup transitions. Exp19 then compared X.555 and X.556 objects
+            // directly, so the condition never matched. Mirror Facebook's own A1X
+            // predicate here and suppress ONLY the two states that set enteringAd=true.
             val clazz = runCatching { Class.forName("X.B94", false, classLoader) }.getOrNull()
                 ?: return 0
             val method = clazz.declaredMethods.firstOrNull {
@@ -224,13 +225,26 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val eventStateField = runCatching {
                 eventClass.getDeclaredField("A00").apply { isAccessible = true }
             }.getOrNull() ?: return 0
-            val stateClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
+            val classifierClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
+                ?: return 0
+            val stateValueClass = runCatching { Class.forName("X.555", false, classLoader) }.getOrNull()
                 ?: return 0
             val adStateA0B = runCatching {
-                stateClass.getDeclaredField("A0B").apply { isAccessible = true }.get(null)
+                classifierClass.getDeclaredField("A0B").apply { isAccessible = true }.get(null)
             }.getOrNull() ?: return 0
             val adStateA09 = runCatching {
-                stateClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
+                classifierClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
+            }.getOrNull() ?: return 0
+
+            // Facebook's own B94.AuA does not compare CZQ.A00 directly with
+            // X.556.A0B/A09. CZQ.A00 is X.555 and the classifier constants are
+            // X.556; the app calls X.9dO.A1X(X.556, X.555) for both tests.
+            // Use that exact predicate so our hook mirrors v579 semantics.
+            val statePredicate = runCatching {
+                val helperClass = Class.forName("X.9dO", false, classLoader)
+                helperClass.getDeclaredMethod("A1X", classifierClass, stateValueClass).apply {
+                    isAccessible = true
+                }
             }.getOrNull() ?: return 0
 
             if (!hookedMethods.add(method)) {
@@ -243,7 +257,17 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     val event = param.args.getOrNull(0) ?: return
                     if (!eventClass.isInstance(event)) return
                     val state = runCatching { eventStateField.get(event) }.getOrNull() ?: return
-                    if (state !== adStateA0B && state !== adStateA09) {
+
+                    val matchesA0B = runCatching {
+                        statePredicate.invoke(null, adStateA0B, state) as? Boolean
+                    }.getOrNull() == true
+                    val matchesA09 = if (!matchesA0B) {
+                        runCatching {
+                            statePredicate.invoke(null, adStateA09, state) as? Boolean
+                        }.getOrNull() == true
+                    } else false
+
+                    if (!matchesA0B && !matchesA09) {
                         // Leave the normal false/cleanup transition untouched.
                         return
                     }
@@ -251,7 +275,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     xlog(
                         "HIT reels-content-video-ad-state-listener " +
                             "${method.declaringClass.name}.${method.name} " +
-                            "state=${if (state === adStateA0B) "A0B" else "A09"} suppressing enter-ad transition"
+                            "state=${if (matchesA0B) "A0B" else "A09"} suppressing enter-ad transition"
                     )
                     param.result = null
                 }
