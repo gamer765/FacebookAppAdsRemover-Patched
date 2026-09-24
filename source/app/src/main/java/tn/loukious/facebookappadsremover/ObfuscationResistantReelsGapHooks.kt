@@ -191,9 +191,13 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             // Use that exact predicate so our hook mirrors v579 semantics.
             val statePredicate = runCatching {
                 val helperClass = Class.forName("X.9dO", false, classLoader)
-                helperClass.getDeclaredMethod("A1X", classifierClass, stateValueClass).apply {
-                    isAccessible = true
-                }
+                helperClass.declaredMethods.firstOrNull { candidate ->
+                    candidate.name == "A1X" &&
+                        candidate.returnType == java.lang.Boolean.TYPE &&
+                        candidate.parameterTypes.size == 2 &&
+                        candidate.parameterTypes[0] == classifierClass &&
+                        candidate.parameterTypes[1] == stateValueClass
+                }?.apply { isAccessible = true }
             }.getOrNull() ?: return 0
 
             if (!hookedMethods.add(method)) {
