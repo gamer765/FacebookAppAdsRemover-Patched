@@ -11,8 +11,8 @@ android {
         applicationId = "tn.loukious.facebookappadsremover"
         minSdk = 30
         targetSdk = 35
-        versionCode = 32
-        versionName = "1.10.0-obfexp17-fb579-contentadstatefix"
+        versionCode = 33
+        versionName = "1.10.0-obfexp18-fb579-prestatefix"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
