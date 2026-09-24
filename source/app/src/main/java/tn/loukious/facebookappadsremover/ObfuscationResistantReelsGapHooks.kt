@@ -30,7 +30,6 @@ import java.util.concurrent.atomic.AtomicInteger
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
  *  - Facebook 579 in-content-ad state listener: suppress only A0B/A09 enter-ad events before X.8et.A02 is set;
- *  - X.8et direct state updater: clear internal A02 if a second caller leaves it true;
  *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false as fallback.
  *
  * FBFetchReelsVideoAdsQuery is intentionally NOT blocked: in v579 its A07 path returns
@@ -58,8 +57,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             "reels-query-object-wrapper",
             "rti-void-handoff",
             "reels-content-video-ad-state-gate",
-            "reels-content-video-ad-state-listener",
-            "reels-content-video-ad-direct-state-guard"
+            "reels-content-video-ad-state-listener"
         )
 
         private fun xlog(message: String) {
@@ -146,55 +144,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     " params=${method.parameterCount} return=${method.returnType.name}"
             )
             return true
-        }
-
-        private fun installDirectContentAdStateGuard(classLoader: ClassLoader): Int {
-            // Facebook 579 has a second caller of ReelsVddLayout::commentBarStateChange:
-            // X.8et.A00(...). Unlike X.B94.AuA, this path writes the internal
-            // X.8et.A02 AtomicBoolean directly before calling X.7V4.A00.
-            //
-            // The exp19 log captured X.7V4.A00(true) with no conditional B94 hit,
-            // proving this direct path can independently enter ad state. Allow A00
-            // to perform all of its normal bookkeeping, then immediately clear only
-            // A02 if it was left true. The X.7V4 fallback hook simultaneously forces
-            // the externally published CommentBarState flag false.
-            val clazz = runCatching { Class.forName("X.8et", false, classLoader) }.getOrNull()
-                ?: return 0
-            val stateField = runCatching {
-                clazz.getDeclaredField("A02").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
-            val method = clazz.declaredMethods.firstOrNull {
-                it.name == "A00" &&
-                    it.returnType == Void.TYPE &&
-                    it.parameterCount == 6
-            } ?: return 0
-
-            if (!hookedMethods.add(method)) {
-                installedLabels.add("reels-content-video-ad-direct-state-guard")
-                return 0
-            }
-
-            method.isAccessible = true
-            XposedBridge.hookMethod(method, object : XC_MethodHook(-10000) {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val target = param.thisObject ?: return
-                    val atomic = runCatching {
-                        stateField.get(target) as? java.util.concurrent.atomic.AtomicBoolean
-                    }.getOrNull() ?: return
-                    if (atomic.compareAndSet(true, false)) {
-                        xlog(
-                            "HIT reels-content-video-ad-direct-state-guard " +
-                                "${method.declaringClass.name}.${method.name} cleared internal A02=true"
-                        )
-                    }
-                }
-            })
-            installedLabels.add("reels-content-video-ad-direct-state-guard")
-            xlog(
-                "INSTALLED reels-content-video-ad-direct-state-guard " +
-                    "${method.declaringClass.name}.${method.name}"
-            )
-            return 1
         }
 
         private fun installContentAdStateListenerBlock(classLoader: ClassLoader): Int {
@@ -403,7 +352,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         // the organic Reel remains active while downstream ad filtering
                         // discards the ad payload.
                         installed += installContentAdStateListenerBlock(classLoader)
-                        installed += installDirectContentAdStateGuard(classLoader)
                         installed += installStateGate(bridge, classLoader)
 
                         xlog(
