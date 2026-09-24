@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Remaining 579 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
- *  - Facebook 579 in-content-ad state listener: suppress only A0B/A09 enter-ad events before X.8et.A02 is set;
+ *  - Facebook 579 in-content-ad state listener: convert A0B/A09 enter-ad events into an explicit normal-state publication;
  *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false as fallback.
  *
  * FBFetchReelsVideoAdsQuery is intentionally NOT blocked: in v579 its A07 path returns
@@ -152,15 +152,18 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             // X.B94.AuA(X.bsE)
             //   if (event.Au8() == 178) {
             //       val state = (event as X.CZQ).A00
-            //       val enteringAd = (state == X.556.A0B || state == X.556.A09)
+            //       val enteringAd =
+            //           X.9dO.A1X(X.556.A0B, state) ||
+            //           X.9dO.A1X(X.556.A09, state)
             //       X.8et.A02.set(enteringAd)
-            //       X.7V4.A00(..., enteringAd)
+            //       X.7V4.A00(currentState..., enteringAd)
             //   }
             //
-            // Exp18 returned from AuA for every callback, which also swallowed the
-            // false/cleanup transitions. Exp19 then compared X.555 and X.556 objects
-            // directly, so the condition never matched. Mirror Facebook's own A1X
-            // predicate here and suppress ONLY the two states that set enteringAd=true.
+            // Exp20 correctly detected A0B/A09, but returned from AuA before the
+            // normal-state publication. Vector then showed the ad itself suppressed
+            // while the Reel stayed frozen / lost its overlay. For an enter-ad event,
+            // mirror B94's tail with enteringAd=false instead: explicitly clear A02
+            // and publish X.7V4.A00(..., false) using the current state snapshot.
             val clazz = runCatching { Class.forName("X.B94", false, classLoader) }.getOrNull()
                 ?: return 0
             val method = clazz.declaredMethods.firstOrNull {
@@ -174,6 +177,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val eventStateField = runCatching {
                 eventClass.getDeclaredField("A00").apply { isAccessible = true }
             }.getOrNull() ?: return 0
+
             val classifierClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
                 ?: return 0
             val stateValueClass = runCatching { Class.forName("X.555", false, classLoader) }.getOrNull()
@@ -185,10 +189,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 classifierClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
             }.getOrNull() ?: return 0
 
-            // Facebook's own B94.AuA does not compare CZQ.A00 directly with
-            // X.556.A0B/A09. CZQ.A00 is X.555 and the classifier constants are
-            // X.556; the app calls X.9dO.A1X(X.556, X.555) for both tests.
-            // Use that exact predicate so our hook mirrors v579 semantics.
             val statePredicate = runCatching {
                 val helperClass = Class.forName("X.9dO", false, classLoader)
                 helperClass.declaredMethods.firstOrNull { candidate ->
@@ -199,6 +199,57 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         candidate.parameterTypes[1] == stateValueClass
                 }?.apply { isAccessible = true }
             }.getOrNull() ?: return 0
+
+            // Resolve the exact B94 -> 7oh -> 8fp -> 8et chain used by AuA.
+            val b94OwnerField = runCatching {
+                clazz.getDeclaredField("A01").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val holder7ohClass = runCatching { Class.forName("X.7oh", false, classLoader) }.getOrNull()
+                ?: return 0
+            val holder7ohStateField = runCatching {
+                holder7ohClass.getDeclaredField("A00").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val holder8fpClass = runCatching { Class.forName("X.8fp", false, classLoader) }.getOrNull()
+                ?: return 0
+            val holder8fpStateField = runCatching {
+                holder8fpClass.getDeclaredField("A0C").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateOwnerClass = runCatching { Class.forName("X.8et", false, classLoader) }.getOrNull()
+                ?: return 0
+
+            val stateAdField = runCatching {
+                stateOwnerClass.getDeclaredField("A02").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val statePublisherField = runCatching {
+                stateOwnerClass.getDeclaredField("A00").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateIntField = runCatching {
+                stateOwnerClass.getDeclaredField("A05").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateRef1Field = runCatching {
+                stateOwnerClass.getDeclaredField("A06").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateRef2Field = runCatching {
+                stateOwnerClass.getDeclaredField("A07").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateBool1Field = runCatching {
+                stateOwnerClass.getDeclaredField("A01").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateBool2Field = runCatching {
+                stateOwnerClass.getDeclaredField("A04").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+
+            val publisherClass = runCatching { Class.forName("X.7V4", false, classLoader) }.getOrNull()
+                ?: return 0
+            val publisherMethod = publisherClass.declaredMethods.firstOrNull { candidate ->
+                candidate.name == "A00" &&
+                    candidate.returnType == Void.TYPE &&
+                    candidate.parameterTypes.size == 6 &&
+                    candidate.parameterTypes[2] == Integer.TYPE &&
+                    candidate.parameterTypes[3] == java.lang.Boolean.TYPE &&
+                    candidate.parameterTypes[4] == java.lang.Boolean.TYPE &&
+                    candidate.parameterTypes[5] == java.lang.Boolean.TYPE
+            }?.apply { isAccessible = true } ?: return 0
 
             if (!hookedMethods.add(method)) {
                 installedLabels.add("reels-content-video-ad-state-listener")
@@ -219,16 +270,61 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                             statePredicate.invoke(null, adStateA09, state) as? Boolean
                         }.getOrNull() == true
                     } else false
+                    if (!matchesA0B && !matchesA09) return
 
-                    if (!matchesA0B && !matchesA09) {
-                        // Leave the normal false/cleanup transition untouched.
-                        return
-                    }
+                    val repaired = runCatching {
+                        val holder7oh = b94OwnerField.get(param.thisObject) ?: return@runCatching false
+                        val holder8fp = holder7ohStateField.get(holder7oh) ?: return@runCatching false
+                        val stateOwner = holder8fpStateField.get(holder8fp) ?: return@runCatching false
+
+                        val adFlag = stateAdField.get(stateOwner)
+                            as? java.util.concurrent.atomic.AtomicBoolean
+                            ?: return@runCatching false
+                        adFlag.set(false)
+
+                        val publisher = statePublisherField.get(stateOwner)
+                            ?: return@runCatching true
+                        val intState = (
+                            stateIntField.get(stateOwner)
+                                as? java.util.concurrent.atomic.AtomicInteger
+                        )?.get() ?: 0
+                        val ref1 = (
+                            stateRef1Field.get(stateOwner)
+                                as? java.util.concurrent.atomic.AtomicReference<*>
+                        )?.get()
+                        val ref2 = (
+                            stateRef2Field.get(stateOwner)
+                                as? java.util.concurrent.atomic.AtomicReference<*>
+                        )?.get()
+                        val bool1 = (
+                            stateBool1Field.get(stateOwner)
+                                as? java.util.concurrent.atomic.AtomicBoolean
+                        )?.get() ?: false
+                        val bool2 = (
+                            stateBool2Field.get(stateOwner)
+                                as? java.util.concurrent.atomic.AtomicBoolean
+                        )?.get() ?: false
+
+                        // B94 passes A07 first, A06 second, then A05/A01/A04/A02.
+                        publisherMethod.invoke(
+                            publisher,
+                            ref2,
+                            ref1,
+                            intState,
+                            bool1,
+                            bool2,
+                            false
+                        )
+                        true
+                    }.onFailure {
+                        xlog("Failed to publish normal state for blocked Reels ad transition", it)
+                    }.getOrDefault(false)
 
                     xlog(
                         "HIT reels-content-video-ad-state-listener " +
                             "${method.declaringClass.name}.${method.name} " +
-                            "state=${if (matchesA0B) "A0B" else "A09"} suppressing enter-ad transition"
+                            "state=${if (matchesA0B) "A0B" else "A09"} " +
+                            "converted enter-ad -> normal repaired=$repaired"
                     )
                     param.result = null
                 }
@@ -236,7 +332,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             installedLabels.add("reels-content-video-ad-state-listener")
             xlog(
                 "INSTALLED reels-content-video-ad-state-listener " +
-                    "${method.declaringClass.name}.${method.name} conditional=A0B|A09"
+                    "${method.declaringClass.name}.${method.name} conditional=A0B|A09 mode=normal-state-conversion"
             )
             return 1
         }
