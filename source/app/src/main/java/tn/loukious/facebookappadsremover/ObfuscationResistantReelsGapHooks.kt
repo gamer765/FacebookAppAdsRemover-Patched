@@ -29,7 +29,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Remaining 579 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
- *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false.
+ *  - Facebook 579 in-content-ad state listener: suppress the event before X.8et.A02 is set;
+ *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false as fallback.
  *
  * FBFetchReelsVideoAdsQuery is intentionally NOT blocked: in v579 its A07 path returns
  * an async future, and forcing null leaves Reels playback stuck after the "ad starting"
@@ -55,7 +56,8 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         private val desiredLabels = setOf(
             "reels-query-object-wrapper",
             "rti-void-handoff",
-            "reels-content-video-ad-state-gate"
+            "reels-content-video-ad-state-gate",
+            "reels-content-video-ad-state-listener"
         )
 
         private fun xlog(message: String) {
@@ -142,6 +144,45 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     " params=${method.parameterCount} return=${method.returnType.name}"
             )
             return true
+        }
+
+        private fun installContentAdStateListenerBlock(classLoader: ClassLoader): Int {
+            // Facebook 579-specific caller identified from DEX xrefs:
+            // X.B94.AuA(event) handles event id 178, derives the desired
+            // isPlayingInContentVideoAd value, writes X.8et.A02 (AtomicBoolean),
+            // then calls ReelsVddLayout::commentBarStateChange (X.7V4.A00).
+            //
+            // Exp17 only forced the later CommentBarState argument false; A02
+            // remained true, which left the organic Reel stuck on its last frame.
+            // Suppressing this listener keeps the internal ad state false before
+            // any downstream Reels UI/player logic can observe it.
+            val clazz = runCatching { Class.forName("X.B94", false, classLoader) }.getOrNull()
+                ?: return 0
+            val method = clazz.declaredMethods.firstOrNull {
+                it.name == "AuA" &&
+                    it.returnType == Void.TYPE &&
+                    it.parameterCount == 1
+            } ?: return 0
+            if (!hookedMethods.add(method)) {
+                installedLabels.add("reels-content-video-ad-state-listener")
+                return 0
+            }
+            method.isAccessible = true
+            XposedBridge.hookMethod(method, object : XC_MethodHook(10000) {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    xlog(
+                        "HIT reels-content-video-ad-state-listener " +
+                            "${method.declaringClass.name}.${method.name} suppressing v579 in-content-ad state event"
+                    )
+                    param.result = null
+                }
+            })
+            installedLabels.add("reels-content-video-ad-state-listener")
+            xlog(
+                "INSTALLED reels-content-video-ad-state-listener " +
+                    "${method.declaringClass.name}.${method.name}"
+            )
+            return 1
         }
 
         private fun installStateGate(
@@ -258,6 +299,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         // isPlayingInContentVideoAd field. Force only that flag false so
                         // the organic Reel remains active while downstream ad filtering
                         // discards the ad payload.
+                        installed += installContentAdStateListenerBlock(classLoader)
                         installed += installStateGate(bridge, classLoader)
 
                         xlog(
