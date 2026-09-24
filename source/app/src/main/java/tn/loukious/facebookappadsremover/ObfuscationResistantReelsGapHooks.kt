@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Remaining 579 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
- *  - Facebook 579 in-content-ad state listener: suppress the event before X.8et.A02 is set;
+ *  - Facebook 579 in-content-ad state listener: suppress only A0B/A09 enter-ad events before X.8et.A02 is set;
  *  - ReelsVddLayout in-content-ad state gate: force isPlayingInContentVideoAd=false as fallback.
  *
  * FBFetchReelsVideoAdsQuery is intentionally NOT blocked: in v579 its A07 path returns
@@ -147,15 +147,19 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         }
 
         private fun installContentAdStateListenerBlock(classLoader: ClassLoader): Int {
-            // Facebook 579-specific caller identified from DEX xrefs:
-            // X.B94.AuA(event) handles event id 178, derives the desired
-            // isPlayingInContentVideoAd value, writes X.8et.A02 (AtomicBoolean),
-            // then calls ReelsVddLayout::commentBarStateChange (X.7V4.A00).
+            // Facebook 579 DEX (classes6.dex) gives the exact transition logic:
             //
-            // Exp17 only forced the later CommentBarState argument false; A02
-            // remained true, which left the organic Reel stuck on its last frame.
-            // Suppressing this listener keeps the internal ad state false before
-            // any downstream Reels UI/player logic can observe it.
+            // X.B94.AuA(X.bsE)
+            //   if (event.Au8() == 178) {
+            //       val state = (event as X.CZQ).A00
+            //       val enteringAd = (state == X.556.A0B || state == X.556.A09)
+            //       X.8et.A02.set(enteringAd)
+            //       X.7V4.A00(..., enteringAd)
+            //   }
+            //
+            // Exp18 returned from AuA for every callback, which also swallowed the
+            // false/cleanup transitions. Mirror Facebook's own condition here and
+            // suppress ONLY the two states that would set enteringAd=true.
             val clazz = runCatching { Class.forName("X.B94", false, classLoader) }.getOrNull()
                 ?: return 0
             val method = clazz.declaredMethods.firstOrNull {
@@ -163,6 +167,21 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     it.returnType == Void.TYPE &&
                     it.parameterCount == 1
             } ?: return 0
+
+            val eventClass = runCatching { Class.forName("X.CZQ", false, classLoader) }.getOrNull()
+                ?: return 0
+            val eventStateField = runCatching {
+                eventClass.getDeclaredField("A00").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
+                ?: return 0
+            val adStateA0B = runCatching {
+                stateClass.getDeclaredField("A0B").apply { isAccessible = true }.get(null)
+            }.getOrNull() ?: return 0
+            val adStateA09 = runCatching {
+                stateClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
+            }.getOrNull() ?: return 0
+
             if (!hookedMethods.add(method)) {
                 installedLabels.add("reels-content-video-ad-state-listener")
                 return 0
@@ -170,9 +189,18 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             method.isAccessible = true
             XposedBridge.hookMethod(method, object : XC_MethodHook(10000) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
+                    val event = param.args.getOrNull(0) ?: return
+                    if (!eventClass.isInstance(event)) return
+                    val state = runCatching { eventStateField.get(event) }.getOrNull() ?: return
+                    if (state !== adStateA0B && state !== adStateA09) {
+                        // Leave the normal false/cleanup transition untouched.
+                        return
+                    }
+
                     xlog(
                         "HIT reels-content-video-ad-state-listener " +
-                            "${method.declaringClass.name}.${method.name} suppressing v579 in-content-ad state event"
+                            "${method.declaringClass.name}.${method.name} " +
+                            "state=${if (state === adStateA0B) "A0B" else "A09"} suppressing enter-ad transition"
                     )
                     param.result = null
                 }
@@ -180,7 +208,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             installedLabels.add("reels-content-video-ad-state-listener")
             xlog(
                 "INSTALLED reels-content-video-ad-state-listener " +
-                    "${method.declaringClass.name}.${method.name}"
+                    "${method.declaringClass.name}.${method.name} conditional=A0B|A09"
             )
             return 1
         }
