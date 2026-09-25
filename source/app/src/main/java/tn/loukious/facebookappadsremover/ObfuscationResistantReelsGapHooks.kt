@@ -58,9 +58,21 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             "reels-query-object-wrapper",
             "rti-void-handoff",
             "reels-content-video-ad-state-gate",
-            "reels-content-video-ad-state-listener",
-            "reels-ad-state-event-sanitizer"
+            "reels-dynamic-state-continuity"
         )
+
+        private data class DynamicStateContext(
+            val listener: Method,
+            val atomicsBefore: IdentityHashMap<AtomicBoolean, Boolean>,
+            var attemptedAdState: Boolean = false,
+            var publisher: Method? = null
+        )
+
+        private val dynamicStateContext = ThreadLocal<DynamicStateContext?>()
+        private val dynamicListenerHooks: MutableSet<Method> =
+            Collections.synchronizedSet(HashSet())
+        private val dynamicPublisherHooks: MutableSet<Method> =
+            Collections.synchronizedSet(HashSet())
 
         private fun xlog(message: String) {
             Log.i(TAG, message)
@@ -146,6 +158,276 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     " params=${method.parameterCount} return=${method.returnType.name}"
             )
             return true
+        }
+
+
+        private fun snapshotReachableAtomicBooleans(
+            root: Any?,
+            maxDepth: Int = 4
+        ): IdentityHashMap<AtomicBoolean, Boolean> {
+            val result = IdentityHashMap<AtomicBoolean, Boolean>()
+            if (root == null) return result
+
+            val seen = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
+            val queue = ArrayDeque<Pair<Any, Int>>()
+            queue.add(root to 0)
+
+            while (queue.isNotEmpty() && seen.size < 96) {
+                val (current, depth) = queue.removeFirst()
+                if (!seen.add(current)) continue
+
+                if (current is AtomicBoolean) {
+                    result[current] = current.get()
+                    continue
+                }
+                if (depth >= maxDepth) continue
+
+                var clazz: Class<*>? = current.javaClass
+                while (clazz != null && clazz != Any::class.java) {
+                    clazz.declaredFields
+                        .asSequence()
+                        .filter { field -> !Modifier.isStatic(field.modifiers) }
+                        .take(32)
+                        .forEach { field ->
+                            val value = runCatching {
+                                field.isAccessible = true
+                                field.get(current)
+                            }.getOrNull() ?: return@forEach
+
+                            when (value) {
+                                is AtomicBoolean -> {
+                                    if (!result.containsKey(value)) {
+                                        result[value] = value.get()
+                                    }
+                                }
+                                else -> {
+                                    val className = value.javaClass.name
+                                    if (
+                                        className.startsWith("X.") &&
+                                        seen.size < 96
+                                    ) {
+                                        queue.add(value to (depth + 1))
+                                    }
+                                }
+                            }
+                        }
+                    clazz = clazz.superclass
+                }
+            }
+
+            return result
+        }
+
+        private fun resetAtomicsRaisedByAdTransition(
+            before: IdentityHashMap<AtomicBoolean, Boolean>
+        ): Int {
+            var reset = 0
+            before.forEach { atomic, wasSet ->
+                if (!wasSet && atomic.compareAndSet(true, false)) {
+                    reset++
+                }
+            }
+            return reset
+        }
+
+        private fun installDynamicStateContinuityGuard(
+            bridge: DexKitBridge,
+            classLoader: ClassLoader
+        ): Int {
+            // Facebook 580 changed the concrete X.* classes used by the Reels
+            // in-content-ad state listener. Resolve the listener structurally instead:
+            //
+            //  - it is a one-argument void event listener;
+            //  - the v579 path used event id 178;
+            //  - it calls a state publisher shaped as
+            //    void(Object, Object, int, boolean, boolean, boolean).
+            //
+            // Prefer callers of the stable ReelsVddLayout marker, then fall back to
+            // the old event-id + publisher-shape relationship if Meta moved the marker.
+            val markerAndEventCandidates = bridge.findMethod {
+                matcher {
+                    returnType = "void"
+                    paramCount = 1
+                    usingNumbers(178)
+                    invokeMethods {
+                        add {
+                            returnType = "void"
+                            paramCount = 6
+                            usingStrings("ReelsVddLayout::commentBarStateChange")
+                        }
+                    }
+                }
+            }
+
+            val markerCandidates = if (markerAndEventCandidates.isEmpty()) {
+                bridge.findMethod {
+                    matcher {
+                        returnType = "void"
+                        paramCount = 1
+                        invokeMethods {
+                            add {
+                                returnType = "void"
+                                paramCount = 6
+                                usingStrings("ReelsVddLayout::commentBarStateChange")
+                            }
+                        }
+                    }
+                }
+            } else {
+                markerAndEventCandidates
+            }
+
+            val candidates = if (markerCandidates.isNotEmpty()) {
+                markerCandidates
+            } else {
+                bridge.findMethod {
+                    matcher {
+                        returnType = "void"
+                        paramCount = 1
+                        usingNumbers(178)
+                        invokeMethods {
+                            add {
+                                returnType = "void"
+                                paramTypes(
+                                    listOf(
+                                        null,
+                                        null,
+                                        "int",
+                                        "boolean",
+                                        "boolean",
+                                        "boolean"
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            var installed = 0
+            candidates.take(12).forEach listenerLoop@ { methodData ->
+                val listener = runCatching {
+                    methodData.getMethodInstance(classLoader)
+                }.getOrNull() ?: return@listenerLoop
+
+                if (
+                    listener.name == "<init>" ||
+                    listener.name == "<clinit>" ||
+                    !listener.declaringClass.name.startsWith("X.")
+                ) {
+                    return@listenerLoop
+                }
+
+                val listenerDescriptor = runCatching {
+                    org.luckypray.dexkit.util.DexSignUtil.getMethodDescriptor(listener)
+                }.getOrNull() ?: return@listenerLoop
+
+                val publisherData = bridge.findMethod {
+                    matcher {
+                        returnType = "void"
+                        paramTypes(
+                            listOf(
+                                null,
+                                null,
+                                "int",
+                                "boolean",
+                                "boolean",
+                                "boolean"
+                            )
+                        )
+                        addCaller(listenerDescriptor)
+                    }
+                }
+
+                val publishers = publisherData.mapNotNull { data ->
+                    runCatching { data.getMethodInstance(classLoader) }.getOrNull()
+                }.filter { method ->
+                    method.declaringClass.name.startsWith("X.")
+                }
+
+                if (publishers.isEmpty()) return@listenerLoop
+
+                publishers.forEach publisherLoop@ { publisher ->
+                    if (!dynamicPublisherHooks.add(publisher)) return@publisherLoop
+                    publisher.isAccessible = true
+                    XposedBridge.hookMethod(publisher, object : XC_MethodHook(20_000) {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val context = dynamicStateContext.get() ?: return
+                            if (param.args.getOrNull(5) != true) return
+
+                            context.attemptedAdState = true
+                            context.publisher = publisher
+                            param.args[5] = false
+                            xlog(
+                                "HIT reels-dynamic-state-publisher " +
+                                    "${publisher.declaringClass.name}.${publisher.name} " +
+                                    "listener=${context.listener.declaringClass.name}.${context.listener.name} " +
+                                    "forcing inContentAd=false"
+                            )
+                        }
+                    })
+                    xlog(
+                        "INSTALLED reels-dynamic-state-publisher " +
+                            "${publisher.declaringClass.name}.${publisher.name} " +
+                            "from=${listener.declaringClass.name}.${listener.name}"
+                    )
+                }
+
+                if (!dynamicListenerHooks.add(listener)) return@listenerLoop
+                listener.isAccessible = true
+                XposedBridge.hookMethod(listener, object : XC_MethodHook(20_000) {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (dynamicStateContext.get() != null) return
+                        dynamicStateContext.set(
+                            DynamicStateContext(
+                                listener = listener,
+                                atomicsBefore = snapshotReachableAtomicBooleans(
+                                    param.thisObject
+                                )
+                            )
+                        )
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        val context = dynamicStateContext.get()
+                        if (context == null || context.listener != listener) return
+
+                        try {
+                            if (context.attemptedAdState) {
+                                val reset = resetAtomicsRaisedByAdTransition(
+                                    context.atomicsBefore
+                                )
+                                xlog(
+                                    "HIT reels-dynamic-state-continuity " +
+                                        "${listener.declaringClass.name}.${listener.name} " +
+                                        "publisher=${context.publisher?.declaringClass?.name}." +
+                                        "${context.publisher?.name} resetAtomics=$reset"
+                                )
+                            }
+                        } finally {
+                            dynamicStateContext.remove()
+                        }
+                    }
+                })
+
+                val publisherNames = publishers.joinToString { method ->
+                    method.declaringClass.name + "." + method.name
+                }
+                xlog(
+                    "INSTALLED reels-dynamic-state-continuity " +
+                        "${listener.declaringClass.name}.${listener.name} " +
+                        "publishers=$publisherNames"
+                )
+                installed++
+            }
+
+            if (installed > 0) {
+                installedLabels.add("reels-dynamic-state-continuity")
+            } else {
+                xlog("Dynamic Reels state-continuity listener not resolved yet")
+            }
+
+            return installed
         }
 
         private fun installAdStateEventSanitizer(classLoader: ClassLoader): Int {
@@ -568,6 +850,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         installed += installAdStateEventSanitizer(classLoader)
                         installed += installContentAdStateListenerBlock(classLoader)
                         installed += installStateGate(bridge, classLoader)
+                        installed += installDynamicStateContinuityGuard(bridge, classLoader)
 
                         xlog(
                             "SCAN reason=$reason attempt=$attempt installed=$installed " +
