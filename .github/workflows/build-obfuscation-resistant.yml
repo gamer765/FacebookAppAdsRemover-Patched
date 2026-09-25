@@ -44,3 +44,20 @@ jobs:
           name: FacebookAppAdsRemover-v1.10.0-obfexp23-fb580-dynamicstatecontinuity-unsigned
           path: source/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      - name: Package Android APK signer
+        run: |
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -type f -name apksigner | sort -V | tail -1)"
+          test -n "$APKSIGNER"
+          TOOL_DIR="$(dirname "$APKSIGNER")"
+          mkdir -p apk-signing-tools/lib
+          cp "$TOOL_DIR/apksigner" apk-signing-tools/
+          cp "$TOOL_DIR/lib/apksigner.jar" apk-signing-tools/lib/
+          chmod +x apk-signing-tools/apksigner
+
+      - name: Upload Android APK signer
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apksigner-tool
+          path: apk-signing-tools/
+          if-no-files-found: error
