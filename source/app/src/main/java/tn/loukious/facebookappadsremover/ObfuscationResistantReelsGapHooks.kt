@@ -11,17 +11,14 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.luckypray.dexkit.DexKitBridge
 import java.lang.reflect.Method
-import java.lang.reflect.Modifier
-import java.util.ArrayDeque
 import java.util.Collections
-import java.util.IdentityHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Facebook 579 follow-up for Reels ad request paths that changed shape after the original
- * universal stable-string hooks were written.
+ * Facebook 579/580 follow-up for Reels ad request paths and in-content-ad state
+ * transitions that changed shape after the original universal stable-string hooks.
  *
  * Keep this layer below the UI/rendering boundary. Facebook reuses several Reels components
  * and helper wrappers between ads and organic Reels. Vector logs from exp10 showed the new
@@ -29,7 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * were missing, so that wrapper is no longer blocked here. The older zero-arg ad-only resolver
  * remains in ObfuscationResistantVideoHooks.
  *
- * Remaining 579 gap blocks:
+ * Remaining 579/580 gap blocks:
  *  - reels_ad_query_send Object-returning lambda/coroutine wrappers;
  *  - IMMERSIVE_REAL_TIME_INTENT one-argument void handoff;
  *  - Facebook 579 CZQ state event: clear pause-ad/player-block/overlay-hide flags before broadcast;
@@ -61,21 +58,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             "reels-query-object-wrapper",
             "rti-void-handoff",
             "reels-content-video-ad-state-gate",
-            "reels-dynamic-state-continuity"
+            "reels-content-video-ad-state-listener",
+            "reels-ad-state-event-sanitizer"
         )
-
-        private data class DynamicStateContext(
-            val listener: Method,
-            val atomicsBefore: IdentityHashMap<AtomicBoolean, Boolean>,
-            var attemptedAdState: Boolean = false,
-            var publisher: Method? = null
-        )
-
-        private val dynamicStateContext = ThreadLocal<DynamicStateContext?>()
-        private val dynamicListenerHooks: MutableSet<Method> =
-            Collections.synchronizedSet(HashSet())
-        private val dynamicPublisherHooks: MutableSet<Method> =
-            Collections.synchronizedSet(HashSet())
 
         private fun xlog(message: String) {
             Log.i(TAG, message)
@@ -164,287 +149,45 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         }
 
 
-        private fun snapshotReachableAtomicBooleans(
-            root: Any?,
-            maxDepth: Int = 4
-        ): IdentityHashMap<AtomicBoolean, Boolean> {
-            val result = IdentityHashMap<AtomicBoolean, Boolean>()
-            if (root == null) return result
+        private data class ReelsStateSpec(
+            val eventClassName: String,
+            val stateClassName: String,
+            val keyClassName: String,
+            val helperClassName: String,
+            val generation: String
+        )
 
-            val seen = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
-            val queue = ArrayDeque<Pair<Any, Int>>()
-            queue.add(root to 0)
+        private val stateSpecs = listOf(
+            ReelsStateSpec("X.CZQ", "X.555", "X.556", "X.9dO", "fb579"),
+            ReelsStateSpec("X.Cjr", "X.5EF", "X.5EH", "X.9a5", "fb580")
+        )
 
-            while (queue.isNotEmpty() && seen.size < 96) {
-                val (current, depth) = queue.removeFirst()
-                if (!seen.add(current)) continue
-
-                if (current is AtomicBoolean) {
-                    result[current] = current.get()
-                    continue
-                }
-                if (depth >= maxDepth) continue
-
-                var clazz: Class<*>? = current.javaClass
-                while (clazz != null && clazz != Any::class.java) {
-                    clazz.declaredFields
-                        .asSequence()
-                        .filter { field -> !Modifier.isStatic(field.modifiers) }
-                        .take(32)
-                        .forEach { field ->
-                            val value = runCatching {
-                                field.isAccessible = true
-                                field.get(current)
-                            }.getOrNull() ?: return@forEach
-
-                            when (value) {
-                                is AtomicBoolean -> {
-                                    if (!result.containsKey(value)) {
-                                        result[value] = value.get()
-                                    }
-                                }
-                                else -> {
-                                    val className = value.javaClass.name
-                                    if (
-                                        className.startsWith("X.") &&
-                                        seen.size < 96
-                                    ) {
-                                        queue.add(value to (depth + 1))
-                                    }
-                                }
-                            }
-                        }
-                    clazz = clazz.superclass
-                }
+        private fun resolveStateSpec(classLoader: ClassLoader): Pair<ReelsStateSpec, Array<Class<*>>>? {
+            for (spec in stateSpecs) {
+                val eventClass = runCatching {
+                    Class.forName(spec.eventClassName, false, classLoader)
+                }.getOrNull() ?: continue
+                val stateClass = runCatching {
+                    Class.forName(spec.stateClassName, false, classLoader)
+                }.getOrNull() ?: continue
+                val keyClass = runCatching {
+                    Class.forName(spec.keyClassName, false, classLoader)
+                }.getOrNull() ?: continue
+                val helperClass = runCatching {
+                    Class.forName(spec.helperClassName, false, classLoader)
+                }.getOrNull() ?: continue
+                return spec to arrayOf(eventClass, stateClass, keyClass, helperClass)
             }
-
-            return result
-        }
-
-        private fun resetAtomicsRaisedByAdTransition(
-            before: IdentityHashMap<AtomicBoolean, Boolean>
-        ): Int {
-            var reset = 0
-            before.forEach { atomic, wasSet ->
-                if (!wasSet && atomic.compareAndSet(true, false)) {
-                    reset++
-                }
-            }
-            return reset
-        }
-
-        private fun installDynamicStateContinuityGuard(
-            bridge: DexKitBridge,
-            classLoader: ClassLoader
-        ): Int {
-            // Facebook 580 changed the concrete X.* classes used by the Reels
-            // in-content-ad state listener. Resolve the listener structurally instead:
-            //
-            //  - it is a one-argument void event listener;
-            //  - the v579 path used event id 178;
-            //  - it calls a state publisher shaped as
-            //    void(Object, Object, int, boolean, boolean, boolean).
-            //
-            // Prefer callers of the stable ReelsVddLayout marker, then fall back to
-            // the old event-id + publisher-shape relationship if Meta moved the marker.
-            val markerAndEventCandidates = bridge.findMethod {
-                matcher {
-                    returnType = "void"
-                    paramCount = 1
-                    usingNumbers(178)
-                    invokeMethods {
-                        add {
-                            returnType = "void"
-                            paramCount = 6
-                            usingStrings("ReelsVddLayout::commentBarStateChange")
-                        }
-                    }
-                }
-            }
-
-            val markerCandidates = if (markerAndEventCandidates.isEmpty()) {
-                bridge.findMethod {
-                    matcher {
-                        returnType = "void"
-                        paramCount = 1
-                        invokeMethods {
-                            add {
-                                returnType = "void"
-                                paramCount = 6
-                                usingStrings("ReelsVddLayout::commentBarStateChange")
-                            }
-                        }
-                    }
-                }
-            } else {
-                markerAndEventCandidates
-            }
-
-            val candidates = if (markerCandidates.isNotEmpty()) {
-                markerCandidates
-            } else {
-                bridge.findMethod {
-                    matcher {
-                        returnType = "void"
-                        paramCount = 1
-                        usingNumbers(178)
-                        invokeMethods {
-                            add {
-                                returnType = "void"
-                                paramTypes(
-                                    listOf(
-                                        null,
-                                        null,
-                                        "int",
-                                        "boolean",
-                                        "boolean",
-                                        "boolean"
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            var installed = 0
-            candidates.take(12).forEach listenerLoop@ { methodData ->
-                val listener = runCatching {
-                    methodData.getMethodInstance(classLoader)
-                }.getOrNull() ?: return@listenerLoop
-
-                if (
-                    listener.name == "<init>" ||
-                    listener.name == "<clinit>" ||
-                    !listener.declaringClass.name.startsWith("X.")
-                ) {
-                    return@listenerLoop
-                }
-
-                val listenerDescriptor = runCatching {
-                    org.luckypray.dexkit.util.DexSignUtil.getMethodDescriptor(listener)
-                }.getOrNull() ?: return@listenerLoop
-
-                val publisherData = bridge.findMethod {
-                    matcher {
-                        returnType = "void"
-                        paramTypes(
-                            listOf(
-                                null,
-                                null,
-                                "int",
-                                "boolean",
-                                "boolean",
-                                "boolean"
-                            )
-                        )
-                        addCaller(listenerDescriptor)
-                    }
-                }
-
-                val publishers = publisherData.mapNotNull { data ->
-                    runCatching { data.getMethodInstance(classLoader) }.getOrNull()
-                }.filter { method ->
-                    method.declaringClass.name.startsWith("X.")
-                }
-
-                if (publishers.isEmpty()) return@listenerLoop
-
-                publishers.forEach publisherLoop@ { publisher ->
-                    if (!dynamicPublisherHooks.add(publisher)) return@publisherLoop
-                    publisher.isAccessible = true
-                    XposedBridge.hookMethod(publisher, object : XC_MethodHook(20_000) {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            val context = dynamicStateContext.get() ?: return
-                            if (param.args.getOrNull(5) != true) return
-
-                            context.attemptedAdState = true
-                            context.publisher = publisher
-                            param.args[5] = false
-                            xlog(
-                                "HIT reels-dynamic-state-publisher " +
-                                    "${publisher.declaringClass.name}.${publisher.name} " +
-                                    "listener=${context.listener.declaringClass.name}.${context.listener.name} " +
-                                    "forcing inContentAd=false"
-                            )
-                        }
-                    })
-                    xlog(
-                        "INSTALLED reels-dynamic-state-publisher " +
-                            "${publisher.declaringClass.name}.${publisher.name} " +
-                            "from=${listener.declaringClass.name}.${listener.name}"
-                    )
-                }
-
-                if (!dynamicListenerHooks.add(listener)) return@listenerLoop
-                listener.isAccessible = true
-                XposedBridge.hookMethod(listener, object : XC_MethodHook(20_000) {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (dynamicStateContext.get() != null) return
-                        dynamicStateContext.set(
-                            DynamicStateContext(
-                                listener = listener,
-                                atomicsBefore = snapshotReachableAtomicBooleans(
-                                    param.thisObject
-                                )
-                            )
-                        )
-                    }
-
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val context = dynamicStateContext.get()
-                        if (context == null || context.listener != listener) return
-
-                        try {
-                            if (context.attemptedAdState) {
-                                val reset = resetAtomicsRaisedByAdTransition(
-                                    context.atomicsBefore
-                                )
-                                xlog(
-                                    "HIT reels-dynamic-state-continuity " +
-                                        "${listener.declaringClass.name}.${listener.name} " +
-                                        "publisher=${context.publisher?.declaringClass?.name}." +
-                                        "${context.publisher?.name} resetAtomics=$reset"
-                                )
-                            }
-                        } finally {
-                            dynamicStateContext.remove()
-                        }
-                    }
-                })
-
-                val publisherNames = publishers.joinToString { method ->
-                    method.declaringClass.name + "." + method.name
-                }
-                xlog(
-                    "INSTALLED reels-dynamic-state-continuity " +
-                        "${listener.declaringClass.name}.${listener.name} " +
-                        "publishers=$publisherNames"
-                )
-                installed++
-            }
-
-            if (installed > 0) {
-                installedLabels.add("reels-dynamic-state-continuity")
-            } else {
-                xlog("Dynamic Reels state-continuity listener not resolved yet")
-            }
-
-            return installed
+            return null
         }
 
         private fun installAdStateEventSanitizer(classLoader: ClassLoader): Int {
-            // Facebook 579 builds CZQ(state, playerOrigin, bool) in X.5U9.A1o and
-            // broadcasts that state to multiple listeners. By the time B94.AuA
-            // runs, other listeners may already have consumed flags that pause the
-            // organic Reel or hide its overlay. Sanitize the ad-state snapshot at
-            // construction time so every downstream listener sees a normal state.
-            val eventClass = runCatching { Class.forName("X.CZQ", false, classLoader) }.getOrNull()
-                ?: return 0
-            val stateClass = runCatching { Class.forName("X.555", false, classLoader) }.getOrNull()
-                ?: return 0
-            val keyClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
-                ?: return 0
+            val resolved = resolveStateSpec(classLoader) ?: return 0
+            val spec = resolved.first
+            val eventClass = resolved.second[0]
+            val stateClass = resolved.second[1]
+            val keyClass = resolved.second[2]
+            val helperClass = resolved.second[3]
 
             val ctor = eventClass.declaredConstructors.firstOrNull { candidate ->
                 val p = candidate.parameterTypes
@@ -468,25 +211,24 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 keyClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
             }.getOrNull() ?: return 0
 
-            val statePredicate = runCatching {
-                val helperClass = Class.forName("X.9dO", false, classLoader)
-                helperClass.declaredMethods.firstOrNull { candidate ->
-                    candidate.name == "A1X" &&
-                        candidate.returnType == java.lang.Boolean.TYPE &&
-                        candidate.parameterTypes.size == 2 &&
-                        candidate.parameterTypes[0] == keyClass &&
-                        candidate.parameterTypes[1] == stateClass
-                }?.apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val statePredicate = helperClass.declaredMethods.firstOrNull { candidate ->
+                candidate.name == "A1X" &&
+                    candidate.returnType == java.lang.Boolean.TYPE &&
+                    candidate.parameterTypes.size == 2 &&
+                    candidate.parameterTypes[0] == keyClass &&
+                    candidate.parameterTypes[1] == stateClass
+            }?.apply { isAccessible = true } ?: return 0
 
-            // These are the exact v579 state keys whose names describe the residual
-            // behavior seen after the visible ad was suppressed.
+            // Verified unchanged between Facebook 579 and 580 by inspecting the
+            // exact host APK. These keys are the ad/player flags that create the
+            // residual frozen-video / hidden-overlay transition after the ad card
+            // itself has already been suppressed.
             val falseKeyNames = listOf(
                 "A05", // hasPostRollAd
                 "A06", // isBlockingVideo
                 "A08", // isInContentAdsBannerOrDeferredCardVisible
                 "A09", // isPlayerControlBlocked
-                "A0B", // isPlayingVideo (the ad/player state used by B94)
+                "A0B", // isPlayingVideo state consumed by the ad-state listener
                 "A0F", // shouldHideAllOrganicChromeForPauseAd
                 "A0G", // shouldHideAllOrganicMetadata
                 "A0H", // shouldHideHostVideoOverlay
@@ -533,88 +275,122 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
                     param.args[0] = replacement
                     xlog(
-                        "HIT reels-ad-state-event-sanitizer " +
-                            "CZQ state=${if (matchesA0B) "A0B" else "A09"} " +
+                        "HIT reels-ad-state-event-sanitizer generation=${spec.generation} " +
+                            "state=${if (matchesA0B) "A0B" else "A09"} " +
                             "cleared=postRoll|blocking|controls|adBanner|pauseChrome|overlay|stopLoop"
                     )
                 }
             })
 
             installedLabels.add("reels-ad-state-event-sanitizer")
-            xlog("INSTALLED reels-ad-state-event-sanitizer X.CZQ.<init>")
+            xlog(
+                "INSTALLED reels-ad-state-event-sanitizer generation=${spec.generation} " +
+                    "${eventClass.name}.<init>"
+            )
             return 1
         }
 
+        private data class ReelsListenerSpec(
+            val generation: String,
+            val listenerClassName: String,
+            val listenerMethodName: String,
+            val eventClassName: String,
+            val stateClassName: String,
+            val keyClassName: String,
+            val helperClassName: String,
+            val owner1ClassName: String,
+            val owner2ClassName: String,
+            val stateOwnerClassName: String,
+            val publisherClassName: String,
+            val eventId: Int
+        )
+
+        private val listenerSpecs = listOf(
+            ReelsListenerSpec(
+                "fb579", "X.B94", "AuA", "X.CZQ", "X.555", "X.556", "X.9dO",
+                "X.7oh", "X.8fp", "X.8et", "X.7V4", 178
+            ),
+            ReelsListenerSpec(
+                "fb580", "X.B6e", "AsW", "X.Cjr", "X.5EF", "X.5EH", "X.9a5",
+                "X.7XW", "X.8Ob", "X.8Ni", "X.7x1", 177
+            )
+        )
+
         private fun installContentAdStateListenerBlock(classLoader: ClassLoader): Int {
-            // Facebook 579 DEX (classes6.dex) gives the exact transition logic:
-            //
-            // X.B94.AuA(X.bsE)
-            //   if (event.Au8() == 178) {
-            //       val state = (event as X.CZQ).A00
-            //       val enteringAd =
-            //           X.9dO.A1X(X.556.A0B, state) ||
-            //           X.9dO.A1X(X.556.A09, state)
-            //       X.8et.A02.set(enteringAd)
-            //       X.7V4.A00(currentState..., enteringAd)
-            //   }
-            //
-            // Exp20 correctly detected A0B/A09, but returned from AuA before the
-            // normal-state publication. Vector then showed the ad itself suppressed
-            // while the Reel stayed frozen / lost its overlay. For an enter-ad event,
-            // mirror B94's tail with enteringAd=false instead: explicitly clear A02
-            // and publish X.7V4.A00(..., false) using the current state snapshot.
-            val clazz = runCatching { Class.forName("X.B94", false, classLoader) }.getOrNull()
-                ?: return 0
+            val spec = listenerSpecs.firstOrNull { candidate ->
+                runCatching {
+                    Class.forName(candidate.listenerClassName, false, classLoader)
+                }.isSuccess &&
+                    runCatching {
+                        Class.forName(candidate.eventClassName, false, classLoader)
+                    }.isSuccess
+            } ?: return 0
+
+            val clazz = runCatching {
+                Class.forName(spec.listenerClassName, false, classLoader)
+            }.getOrNull() ?: return 0
             val method = clazz.declaredMethods.firstOrNull {
-                it.name == "AuA" &&
+                it.name == spec.listenerMethodName &&
                     it.returnType == Void.TYPE &&
                     it.parameterCount == 1
             } ?: return 0
 
-            val eventClass = runCatching { Class.forName("X.CZQ", false, classLoader) }.getOrNull()
-                ?: return 0
+            val eventClass = runCatching {
+                Class.forName(spec.eventClassName, false, classLoader)
+            }.getOrNull() ?: return 0
             val eventStateField = runCatching {
                 eventClass.getDeclaredField("A00").apply { isAccessible = true }
             }.getOrNull() ?: return 0
 
-            val classifierClass = runCatching { Class.forName("X.556", false, classLoader) }.getOrNull()
-                ?: return 0
-            val stateValueClass = runCatching { Class.forName("X.555", false, classLoader) }.getOrNull()
-                ?: return 0
+            val classifierClass = runCatching {
+                Class.forName(spec.keyClassName, false, classLoader)
+            }.getOrNull() ?: return 0
+            val stateValueClass = runCatching {
+                Class.forName(spec.stateClassName, false, classLoader)
+            }.getOrNull() ?: return 0
             val adStateA0B = runCatching {
-                classifierClass.getDeclaredField("A0B").apply { isAccessible = true }.get(null)
+                classifierClass.getDeclaredField("A0B").apply {
+                    isAccessible = true
+                }.get(null)
             }.getOrNull() ?: return 0
             val adStateA09 = runCatching {
-                classifierClass.getDeclaredField("A09").apply { isAccessible = true }.get(null)
+                classifierClass.getDeclaredField("A09").apply {
+                    isAccessible = true
+                }.get(null)
             }.getOrNull() ?: return 0
 
-            val statePredicate = runCatching {
-                val helperClass = Class.forName("X.9dO", false, classLoader)
-                helperClass.declaredMethods.firstOrNull { candidate ->
-                    candidate.name == "A1X" &&
-                        candidate.returnType == java.lang.Boolean.TYPE &&
-                        candidate.parameterTypes.size == 2 &&
-                        candidate.parameterTypes[0] == classifierClass &&
-                        candidate.parameterTypes[1] == stateValueClass
-                }?.apply { isAccessible = true }
+            val helperClass = runCatching {
+                Class.forName(spec.helperClassName, false, classLoader)
             }.getOrNull() ?: return 0
+            val statePredicate = helperClass.declaredMethods.firstOrNull { candidate ->
+                candidate.name == "A1X" &&
+                    candidate.returnType == java.lang.Boolean.TYPE &&
+                    candidate.parameterTypes.size == 2 &&
+                    candidate.parameterTypes[0] == classifierClass &&
+                    candidate.parameterTypes[1] == stateValueClass
+            }?.apply { isAccessible = true } ?: return 0
 
-            // Resolve the exact B94 -> 7oh -> 8fp -> 8et chain used by AuA.
+            // Both 579 and 580 use the same field topology; only the obfuscated
+            // class names moved. 580 was verified directly from build 475019277:
+            // B6e.A01 -> 7XW.A00 -> 8Ob.A0C -> 8Ni.
             val b94OwnerField = runCatching {
                 clazz.getDeclaredField("A01").apply { isAccessible = true }
             }.getOrNull() ?: return 0
-            val holder7ohClass = runCatching { Class.forName("X.7oh", false, classLoader) }.getOrNull()
-                ?: return 0
-            val holder7ohStateField = runCatching {
-                holder7ohClass.getDeclaredField("A00").apply { isAccessible = true }
+            val holder1Class = runCatching {
+                Class.forName(spec.owner1ClassName, false, classLoader)
             }.getOrNull() ?: return 0
-            val holder8fpClass = runCatching { Class.forName("X.8fp", false, classLoader) }.getOrNull()
-                ?: return 0
-            val holder8fpStateField = runCatching {
-                holder8fpClass.getDeclaredField("A0C").apply { isAccessible = true }
+            val holder1StateField = runCatching {
+                holder1Class.getDeclaredField("A00").apply { isAccessible = true }
             }.getOrNull() ?: return 0
-            val stateOwnerClass = runCatching { Class.forName("X.8et", false, classLoader) }.getOrNull()
-                ?: return 0
+            val holder2Class = runCatching {
+                Class.forName(spec.owner2ClassName, false, classLoader)
+            }.getOrNull() ?: return 0
+            val holder2StateField = runCatching {
+                holder2Class.getDeclaredField("A0C").apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateOwnerClass = runCatching {
+                Class.forName(spec.stateOwnerClassName, false, classLoader)
+            }.getOrNull() ?: return 0
 
             val stateAdField = runCatching {
                 stateOwnerClass.getDeclaredField("A02").apply { isAccessible = true }
@@ -638,8 +414,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 stateOwnerClass.getDeclaredField("A04").apply { isAccessible = true }
             }.getOrNull() ?: return 0
 
-            val publisherClass = runCatching { Class.forName("X.7V4", false, classLoader) }.getOrNull()
-                ?: return 0
+            val publisherClass = runCatching {
+                Class.forName(spec.publisherClassName, false, classLoader)
+            }.getOrNull() ?: return 0
             val publisherMethod = publisherClass.declaredMethods.firstOrNull { candidate ->
                 candidate.name == "A00" &&
                     candidate.returnType == Void.TYPE &&
@@ -659,7 +436,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val event = param.args.getOrNull(0) ?: return
                     if (!eventClass.isInstance(event)) return
-                    val state = runCatching { eventStateField.get(event) }.getOrNull() ?: return
+                    val state = runCatching {
+                        eventStateField.get(event)
+                    }.getOrNull() ?: return
 
                     val matchesA0B = runCatching {
                         statePredicate.invoke(null, adStateA0B, state) as? Boolean
@@ -672,9 +451,12 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     if (!matchesA0B && !matchesA09) return
 
                     val repaired = runCatching {
-                        val holder7oh = b94OwnerField.get(param.thisObject) ?: return@runCatching false
-                        val holder8fp = holder7ohStateField.get(holder7oh) ?: return@runCatching false
-                        val stateOwner = holder8fpStateField.get(holder8fp) ?: return@runCatching false
+                        val holder1 = b94OwnerField.get(param.thisObject)
+                            ?: return@runCatching false
+                        val holder2 = holder1StateField.get(holder1)
+                            ?: return@runCatching false
+                        val stateOwner = holder2StateField.get(holder2)
+                            ?: return@runCatching false
 
                         val adFlag = stateAdField.get(stateOwner)
                             as? java.util.concurrent.atomic.AtomicBoolean
@@ -704,7 +486,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                                 as? java.util.concurrent.atomic.AtomicBoolean
                         )?.get() ?: false
 
-                        // B94 passes A07 first, A06 second, then A05/A01/A04/A02.
                         publisherMethod.invoke(
                             publisher,
                             ref2,
@@ -716,11 +497,15 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         )
                         true
                     }.onFailure {
-                        xlog("Failed to publish normal state for blocked Reels ad transition", it)
+                        xlog(
+                            "Failed to publish normal state for blocked Reels ad transition",
+                            it
+                        )
                     }.getOrDefault(false)
 
                     xlog(
                         "HIT reels-content-video-ad-state-listener " +
+                            "generation=${spec.generation} eventId=${spec.eventId} " +
                             "${method.declaringClass.name}.${method.name} " +
                             "state=${if (matchesA0B) "A0B" else "A09"} " +
                             "converted enter-ad -> normal repaired=$repaired"
@@ -731,7 +516,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             installedLabels.add("reels-content-video-ad-state-listener")
             xlog(
                 "INSTALLED reels-content-video-ad-state-listener " +
-                    "${method.declaringClass.name}.${method.name} conditional=A0B|A09 mode=normal-state-conversion"
+                    "generation=${spec.generation} eventId=${spec.eventId} " +
+                    "${method.declaringClass.name}.${method.name} conditional=A0B|A09 " +
+                    "mode=normal-state-conversion"
             )
             return 1
         }
@@ -853,7 +640,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         installed += installAdStateEventSanitizer(classLoader)
                         installed += installContentAdStateListenerBlock(classLoader)
                         installed += installStateGate(bridge, classLoader)
-                        installed += installDynamicStateContinuityGuard(bridge, classLoader)
 
                         xlog(
                             "SCAN reason=$reason attempt=$attempt installed=$installed " +
