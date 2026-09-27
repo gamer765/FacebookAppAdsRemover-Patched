@@ -41,7 +41,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: FacebookAppAdsRemover-v1.10.0-obfexp24-fb580-exactstatepath-unsigned
+          name: FacebookAppAdsRemover-v1.10.0-obfexp25-fb580-stable-notrace-unsigned
           path: source/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
