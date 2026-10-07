@@ -158,8 +158,9 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         )
 
         private val stateSpecs = listOf(
-            ReelsStateSpec("X.CZQ", "X.555", "X.556", "X.9dO", "fb579"),
-            ReelsStateSpec("X.Cjr", "X.5EF", "X.5EH", "X.9a5", "fb580")
+            ReelsStateSpec("X.Cg2", "X.5G7", "X.5G9", "X.9aw", "fb475215365"),
+            ReelsStateSpec("X.Cjr", "X.5EF", "X.5EH", "X.9a5", "fb475019277"),
+            ReelsStateSpec("X.CZQ", "X.555", "X.556", "X.9dO", "fb579")
         )
 
         private fun resolveStateSpec(classLoader: ClassLoader): Pair<ReelsStateSpec, Array<Class<*>>>? {
@@ -307,12 +308,16 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         private val listenerSpecs = listOf(
             ReelsListenerSpec(
-                "fb579", "X.B94", "AuA", "X.CZQ", "X.555", "X.556", "X.9dO",
-                "X.7oh", "X.8fp", "X.8et", "X.7V4", 178
+                "fb475215365", "X.BAR", "AtE", "X.Cg2", "X.5G7", "X.5G9", "X.9aw",
+                "X.7Vc", "X.8ee", "X.8dp", "X.7w8", 177
             ),
             ReelsListenerSpec(
-                "fb580", "X.B6e", "AsW", "X.Cjr", "X.5EF", "X.5EH", "X.9a5",
+                "fb475019277", "X.B6e", "AsW", "X.Cjr", "X.5EF", "X.5EH", "X.9a5",
                 "X.7XW", "X.8Ob", "X.8Ni", "X.7x1", 177
+            ),
+            ReelsListenerSpec(
+                "fb579", "X.B94", "AuA", "X.CZQ", "X.555", "X.556", "X.9dO",
+                "X.7oh", "X.8fp", "X.8et", "X.7V4", 178
             )
         )
 
