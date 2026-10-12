@@ -151,6 +151,11 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         }
 
 
+        private val reelsFalseStateKeyNames = listOf(
+            "A05", "A06", "A08", "A09", "A0B", "A0F", "A0G",
+            "A0H", "A0I", "A0J", "A0K", "A0M", "A0P"
+        )
+
         private data class ReelsStateSpec(
             val eventClassName: String,
             val stateClassName: String,
@@ -166,8 +171,12 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             ReelsStateSpec("X.CZQ", "X.555", "X.556", "X.9dO", "fb579")
         )
 
-        private fun resolveStateSpec(classLoader: ClassLoader): Pair<ReelsStateSpec, Array<Class<*>>>? {
-            for (spec in stateSpecs) {
+        private fun resolveStateSpec(
+            classLoader: ClassLoader,
+            preferred: ReelsStateSpec? = null
+        ): Pair<ReelsStateSpec, Array<Class<*>>>? {
+            val candidates = if (preferred != null) listOf(preferred) + stateSpecs else stateSpecs
+            for (spec in candidates) {
                 val eventClass = runCatching {
                     Class.forName(spec.eventClassName, false, classLoader)
                 }.getOrNull() ?: continue
@@ -185,8 +194,20 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             return null
         }
 
-        private fun installAdStateEventSanitizer(classLoader: ClassLoader): Int {
-            val resolved = resolveStateSpec(classLoader) ?: return 0
+        private fun installAdStateEventSanitizer(
+            classLoader: ClassLoader,
+            structuralSpec: ReelsListenerSpec? = null
+        ): Int {
+            val preferred = structuralSpec?.let {
+                ReelsStateSpec(
+                    it.eventClassName,
+                    it.stateClassName,
+                    it.keyClassName,
+                    it.helperClassName,
+                    it.generation
+                )
+            }
+            val resolved = resolveStateSpec(classLoader, preferred) ?: return 0
             val spec = resolved.first
             val eventClass = resolved.second[0]
             val stateClass = resolved.second[1]
@@ -228,27 +249,12 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             // exact host APK. These keys are the ad/player flags that create the
             // residual frozen-video / hidden-overlay transition after the ad card
             // itself has already been suppressed.
-            val falseKeyNames = listOf(
-                "A05", // hasPostRollAd
-                "A06", // isBlockingVideo
-                "A08", // isInContentAdsBannerOrDeferredCardVisible
-                "A09", // isPlayerControlBlocked
-                "A0B", // isPlayingVideo state consumed by the ad-state listener
-                "A0F", // shouldHideAllOrganicChromeForPauseAd
-                "A0G", // shouldHideAllOrganicMetadata
-                "A0H", // shouldHideHostVideoOverlay
-                "A0I", // shouldHideOrganicDescription
-                "A0J", // shouldHideOrganicEyebrow
-                "A0K", // shouldHideOrganicHScrollAugment
-                "A0M", // shouldMoveControllerToFooter
-                "A0P"  // shouldStopLoopingHostVideo
-            )
-            val falseKeys = falseKeyNames.mapNotNull { name ->
+            val falseKeys = reelsFalseStateKeyNames.mapNotNull { name ->
                 runCatching {
                     keyClass.getDeclaredField(name).apply { isAccessible = true }.get(null)
                 }.getOrNull()
             }
-            if (falseKeys.size != falseKeyNames.size) return 0
+            if (falseKeys.size != reelsFalseStateKeyNames.size) return 0
 
             XposedBridge.hookMethod(ctor, object : XC_MethodHook(10000) {
                 override fun beforeHookedMethod(param: MethodHookParam) {
@@ -329,8 +335,214 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             )
         )
 
-        private fun installContentAdStateListenerBlock(classLoader: ClassLoader): Int {
-            val spec = listenerSpecs.firstOrNull { candidate ->
+        private fun resolveStructuralListenerSpec(
+            bridge: DexKitBridge,
+            classLoader: ClassLoader
+        ): ReelsListenerSpec? {
+            val publisherData = bridge.findMethod {
+                matcher {
+                    usingStrings("ReelsVddLayout::commentBarStateChange")
+                    returnType = "void"
+                    paramTypes(
+                        listOf(
+                            null,
+                            null,
+                            "int",
+                            "boolean",
+                            "boolean",
+                            "boolean"
+                        )
+                    )
+                }
+            }
+
+            val publishers = publisherData.mapNotNull { data ->
+                runCatching { data.getMethodInstance(classLoader) }.getOrNull()
+            }.filter { method ->
+                method.declaringClass.name.startsWith("X.") &&
+                    method.returnType == Void.TYPE &&
+                    method.parameterTypes.size == 6 &&
+                    method.parameterTypes[2] == Integer.TYPE &&
+                    method.parameterTypes[3] == java.lang.Boolean.TYPE &&
+                    method.parameterTypes[4] == java.lang.Boolean.TYPE &&
+                    method.parameterTypes[5] == java.lang.Boolean.TYPE
+            }
+
+            if (publishers.isEmpty()) return null
+
+            val listenerData = bridge.findMethod {
+                matcher {
+                    returnType = "void"
+                    paramCount = 1
+                    invokeMethods {
+                        add {
+                            usingStrings("ReelsVddLayout::commentBarStateChange")
+                            returnType = "void"
+                            paramTypes(
+                                listOf(
+                                    null,
+                                    null,
+                                    "int",
+                                    "boolean",
+                                    "boolean",
+                                    "boolean"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            for (listenerInfo in listenerData.take(24)) {
+                val listener = runCatching {
+                    listenerInfo.getMethodInstance(classLoader)
+                }.getOrNull() ?: continue
+
+                if (
+                    !listener.declaringClass.name.startsWith("X.") ||
+                    listener.returnType != Void.TYPE ||
+                    listener.parameterCount != 1
+                ) continue
+
+                val eventClass = listener.parameterTypes[0]
+                if (!eventClass.name.startsWith("X.")) continue
+
+                val eventStateField = eventClass.declaredFields.firstOrNull { field ->
+                    if (Modifier.isStatic(field.modifiers)) return@firstOrNull false
+                    val candidate = field.type
+                    val hasMapField = candidate.declaredFields.any { stateField ->
+                        !Modifier.isStatic(stateField.modifiers) &&
+                            java.util.Map::class.java.isAssignableFrom(stateField.type)
+                    }
+                    val hasMapCtor = candidate.declaredConstructors.any { ctor ->
+                        ctor.parameterTypes.size == 1 &&
+                            java.util.Map::class.java.isAssignableFrom(ctor.parameterTypes[0])
+                    }
+                    hasMapField && hasMapCtor
+                } ?: continue
+                val stateClass = eventStateField.type
+
+                val listenerDescriptor = runCatching {
+                    org.luckypray.dexkit.util.DexSignUtil.getMethodDescriptor(listener)
+                }.getOrNull() ?: continue
+
+                val helperMethods = bridge.findMethod {
+                    matcher {
+                        returnType = "boolean"
+                        paramCount = 2
+                        addCaller(listenerDescriptor)
+                    }
+                }.mapNotNull { data ->
+                    runCatching { data.getMethodInstance(classLoader) }.getOrNull()
+                }
+
+                val statePredicate = helperMethods.firstOrNull { helper ->
+                    if (!Modifier.isStatic(helper.modifiers)) return@firstOrNull false
+                    val params = helper.parameterTypes
+                    if (params.size != 2 || params[1] != stateClass) return@firstOrNull false
+                    val keyClass = params[0]
+                    if (!keyClass.name.startsWith("X.")) return@firstOrNull false
+                    val staticNames = keyClass.declaredFields
+                        .filter { Modifier.isStatic(it.modifiers) }
+                        .map { it.name }
+                        .toSet()
+                    reelsFalseStateKeyNames.all(staticNames::contains)
+                } ?: continue
+                val keyClass = statePredicate.parameterTypes[0]
+
+                for (publisher in publishers) {
+                    data class Node(
+                        val clazz: Class<*>,
+                        val path: List<Class<*>>
+                    )
+
+                    fun isStateOwner(candidate: Class<*>): Boolean {
+                        val fields = candidate.declaredFields.filter {
+                            !Modifier.isStatic(it.modifiers)
+                        }
+                        val hasPublisher = fields.any {
+                            it.type == publisher.declaringClass
+                        }
+                        val booleanCount = fields.count {
+                            it.type == java.util.concurrent.atomic.AtomicBoolean::class.java
+                        }
+                        val intCount = fields.count {
+                            it.type == java.util.concurrent.atomic.AtomicInteger::class.java
+                        }
+                        val refCount = fields.count {
+                            it.type == java.util.concurrent.atomic.AtomicReference::class.java
+                        }
+                        return hasPublisher &&
+                            booleanCount >= 3 &&
+                            intCount >= 1 &&
+                            refCount >= 2
+                    }
+
+                    val queue = ArrayDeque<Node>()
+                    val seen = HashSet<Class<*>>()
+                    queue.add(Node(listener.declaringClass, emptyList()))
+                    seen.add(listener.declaringClass)
+
+                    var ownerPath: List<Class<*>>? = null
+                    while (queue.isNotEmpty() && seen.size <= 96 && ownerPath == null) {
+                        val node = queue.removeFirst()
+                        if (node.path.size >= 4) continue
+
+                        val fields = node.clazz.declaredFields.filter { field ->
+                            !Modifier.isStatic(field.modifiers) &&
+                                field.type.name.startsWith("X.")
+                        }
+                        for (field in fields) {
+                            val next = field.type
+                            if (!seen.add(next)) continue
+                            val nextPath = node.path + next
+                            if (nextPath.size == 3 && isStateOwner(next)) {
+                                ownerPath = nextPath
+                                break
+                            }
+                            queue.add(Node(next, nextPath))
+                        }
+                    }
+
+                    val path = ownerPath ?: continue
+                    val spec = ReelsListenerSpec(
+                        generation = "structural-stable-marker",
+                        listenerClassName = listener.declaringClass.name,
+                        listenerMethodName = listener.name,
+                        eventClassName = eventClass.name,
+                        stateClassName = stateClass.name,
+                        keyClassName = keyClass.name,
+                        helperClassName = statePredicate.declaringClass.name,
+                        owner1ClassName = path[0].name,
+                        owner2ClassName = path[1].name,
+                        stateOwnerClassName = path[2].name,
+                        publisherClassName = publisher.declaringClass.name,
+                        eventId = 0
+                    )
+                    xlog(
+                        "STRUCTURAL Reels state path resolved " +
+                            "listener=${spec.listenerClassName}.${spec.listenerMethodName} " +
+                            "event=${spec.eventClassName} state=${spec.stateClassName} " +
+                            "helper=${spec.helperClassName}.${statePredicate.name} " +
+                            "owners=${spec.owner1ClassName}->${spec.owner2ClassName}->" +
+                            "${spec.stateOwnerClassName} publisher=${spec.publisherClassName}." +
+                            "${publisher.name}"
+                    )
+                    return spec
+                }
+            }
+
+            xlog("Structural Reels state path not resolved; using exact fallback mappings")
+            return null
+        }
+
+        private fun installContentAdStateListenerBlock(
+            classLoader: ClassLoader,
+            structuralSpec: ReelsListenerSpec? = null
+        ): Int {
+            val candidateSpecs =
+                if (structuralSpec != null) listOf(structuralSpec) + listenerSpecs else listenerSpecs
+            val spec = candidateSpecs.firstOrNull { candidate ->
                 runCatching {
                     Class.forName(candidate.listenerClassName, false, classLoader)
                 }.isSuccess &&
@@ -656,8 +868,16 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                         // isPlayingInContentVideoAd field. Force only that flag false so
                         // the organic Reel remains active while downstream ad filtering
                         // discards the ad payload.
-                        installed += installAdStateEventSanitizer(classLoader)
-                        installed += installContentAdStateListenerBlock(classLoader)
+                        val structuralStateSpec =
+                            resolveStructuralListenerSpec(bridge, classLoader)
+                        installed += installAdStateEventSanitizer(
+                            classLoader,
+                            structuralStateSpec
+                        )
+                        installed += installContentAdStateListenerBlock(
+                            classLoader,
+                            structuralStateSpec
+                        )
                         installed += installStateGate(bridge, classLoader)
 
                         xlog(
