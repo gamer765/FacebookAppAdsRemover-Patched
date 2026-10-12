@@ -11,6 +11,8 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.luckypray.dexkit.DexKitBridge
 import java.lang.reflect.Method
+import java.lang.reflect.Modifier
+import java.util.ArrayDeque
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -158,6 +160,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         )
 
         private val stateSpecs = listOf(
+            ReelsStateSpec("X.UvJ", "X.5N1", "X.5P8", "X.9zT", "fb475417129"),
             ReelsStateSpec("X.Cg2", "X.5G7", "X.5G9", "X.9aw", "fb475215365"),
             ReelsStateSpec("X.Cjr", "X.5EF", "X.5EH", "X.9a5", "fb475019277"),
             ReelsStateSpec("X.CZQ", "X.555", "X.556", "X.9dO", "fb579")
@@ -197,9 +200,10 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     p[2] == java.lang.Boolean.TYPE
             }?.apply { isAccessible = true } ?: return 0
 
-            val stateMapField = runCatching {
-                stateClass.getDeclaredField("A00").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val stateMapField = stateClass.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    java.util.Map::class.java.isAssignableFrom(field.type)
+            }?.apply { isAccessible = true } ?: return 0
             val stateCtor = stateClass.declaredConstructors.firstOrNull { candidate ->
                 val p = candidate.parameterTypes
                 p.size == 1 && java.util.Map::class.java.isAssignableFrom(p[0])
@@ -213,7 +217,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             }.getOrNull() ?: return 0
 
             val statePredicate = helperClass.declaredMethods.firstOrNull { candidate ->
-                candidate.name == "A1X" &&
+                Modifier.isStatic(candidate.modifiers) &&
                     candidate.returnType == java.lang.Boolean.TYPE &&
                     candidate.parameterTypes.size == 2 &&
                     candidate.parameterTypes[0] == keyClass &&
@@ -308,6 +312,10 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         private val listenerSpecs = listOf(
             ReelsListenerSpec(
+                "fb475417129", "X.AHP", "AuM", "X.UvJ", "X.5N1", "X.5P8", "X.9zT",
+                "X.95Q", "X.94W", "X.93S", "X.7gb", 177
+            ),
+            ReelsListenerSpec(
                 "fb475215365", "X.BAR", "AtE", "X.Cg2", "X.5G7", "X.5G9", "X.9aw",
                 "X.7Vc", "X.8ee", "X.8dp", "X.7w8", 177
             ),
@@ -334,18 +342,21 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val clazz = runCatching {
                 Class.forName(spec.listenerClassName, false, classLoader)
             }.getOrNull() ?: return 0
-            val method = clazz.declaredMethods.firstOrNull {
-                it.name == spec.listenerMethodName &&
-                    it.returnType == Void.TYPE &&
-                    it.parameterCount == 1
-            } ?: return 0
-
             val eventClass = runCatching {
                 Class.forName(spec.eventClassName, false, classLoader)
             }.getOrNull() ?: return 0
-            val eventStateField = runCatching {
-                eventClass.getDeclaredField("A00").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val method = clazz.declaredMethods.firstOrNull {
+                it.returnType == Void.TYPE &&
+                    it.parameterCount == 1 &&
+                    it.parameterTypes[0] == eventClass &&
+                    (it.name == spec.listenerMethodName ||
+                        spec.generation.startsWith("structural-"))
+            } ?: return 0
+
+            val eventStateField = eventClass.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type.name == spec.stateClassName
+            }?.apply { isAccessible = true } ?: return 0
 
             val classifierClass = runCatching {
                 Class.forName(spec.keyClassName, false, classLoader)
@@ -368,7 +379,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 Class.forName(spec.helperClassName, false, classLoader)
             }.getOrNull() ?: return 0
             val statePredicate = helperClass.declaredMethods.firstOrNull { candidate ->
-                candidate.name == "A1X" &&
+                Modifier.isStatic(candidate.modifiers) &&
                     candidate.returnType == java.lang.Boolean.TYPE &&
                     candidate.parameterTypes.size == 2 &&
                     candidate.parameterTypes[0] == classifierClass &&
@@ -378,21 +389,24 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             // Both 579 and 580 use the same field topology; only the obfuscated
             // class names moved. 580 was verified directly from build 475019277:
             // B6e.A01 -> 7XW.A00 -> 8Ob.A0C -> 8Ni.
-            val b94OwnerField = runCatching {
-                clazz.getDeclaredField("A01").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val b94OwnerField = clazz.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type.name == spec.owner1ClassName
+            }?.apply { isAccessible = true } ?: return 0
             val holder1Class = runCatching {
                 Class.forName(spec.owner1ClassName, false, classLoader)
             }.getOrNull() ?: return 0
-            val holder1StateField = runCatching {
-                holder1Class.getDeclaredField("A00").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val holder1StateField = holder1Class.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type.name == spec.owner2ClassName
+            }?.apply { isAccessible = true } ?: return 0
             val holder2Class = runCatching {
                 Class.forName(spec.owner2ClassName, false, classLoader)
             }.getOrNull() ?: return 0
-            val holder2StateField = runCatching {
-                holder2Class.getDeclaredField("A0C").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val holder2StateField = holder2Class.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type.name == spec.stateOwnerClassName
+            }?.apply { isAccessible = true } ?: return 0
             val stateOwnerClass = runCatching {
                 Class.forName(spec.stateOwnerClassName, false, classLoader)
             }.getOrNull() ?: return 0
@@ -400,9 +414,10 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val stateAdField = runCatching {
                 stateOwnerClass.getDeclaredField("A02").apply { isAccessible = true }
             }.getOrNull() ?: return 0
-            val statePublisherField = runCatching {
-                stateOwnerClass.getDeclaredField("A00").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val statePublisherField = stateOwnerClass.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type.name == spec.publisherClassName
+            }?.apply { isAccessible = true } ?: return 0
             val stateIntField = runCatching {
                 stateOwnerClass.getDeclaredField("A05").apply { isAccessible = true }
             }.getOrNull() ?: return 0
@@ -423,8 +438,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 Class.forName(spec.publisherClassName, false, classLoader)
             }.getOrNull() ?: return 0
             val publisherMethod = publisherClass.declaredMethods.firstOrNull { candidate ->
-                candidate.name == "A00" &&
-                    candidate.returnType == Void.TYPE &&
+                candidate.returnType == Void.TYPE &&
                     candidate.parameterTypes.size == 6 &&
                     candidate.parameterTypes[2] == Integer.TYPE &&
                     candidate.parameterTypes[3] == java.lang.Boolean.TYPE &&
