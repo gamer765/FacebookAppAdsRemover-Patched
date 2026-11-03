@@ -46,7 +46,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
     companion object {
         private const val TAG = "FBAdsObfReelsGap"
         private const val HOST_PACKAGE = "com.facebook.katana"
-        private const val MAX_SCAN_ATTEMPTS = 10
+        private const val MAX_SCAN_ATTEMPTS = 4
 
         private val attachHookInstalled = AtomicBoolean(false)
         private val dexReadyHookInstalled = AtomicBoolean(false)
@@ -56,12 +56,11 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         private val hookedMethods: MutableSet<Method> = Collections.synchronizedSet(HashSet())
         private val installedLabels: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-        private val desiredLabels = setOf(
+        private val requiredLabels = setOf(
             "reels-query-object-wrapper",
             "rti-void-handoff",
             "reels-content-video-ad-state-gate",
-            "reels-content-video-ad-state-listener",
-            "reels-ad-state-event-sanitizer"
+            "reels-content-video-ad-state-listener"
         )
 
         private fun xlog(message: String) {
@@ -305,6 +304,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val generation: String,
             val listenerClassName: String,
             val listenerMethodName: String,
+            val listenerParamClassName: String,
             val eventClassName: String,
             val stateClassName: String,
             val keyClassName: String,
@@ -318,19 +318,19 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         private val listenerSpecs = listOf(
             ReelsListenerSpec(
-                "fb475417129", "X.AHP", "AuM", "X.UvJ", "X.5N1", "X.5P8", "X.9zT",
+                "fb475417129", "X.AHP", "AuM", "X.UvJ", "X.UvJ", "X.5N1", "X.5P8", "X.9zT",
                 "X.95Q", "X.94W", "X.93S", "X.7gb", 177
             ),
             ReelsListenerSpec(
-                "fb475215365", "X.BAR", "AtE", "X.Cg2", "X.5G7", "X.5G9", "X.9aw",
+                "fb475215365", "X.BAR", "AtE", "X.Cg2", "X.Cg2", "X.5G7", "X.5G9", "X.9aw",
                 "X.7Vc", "X.8ee", "X.8dp", "X.7w8", 177
             ),
             ReelsListenerSpec(
-                "fb475019277", "X.B6e", "AsW", "X.Cjr", "X.5EF", "X.5EH", "X.9a5",
+                "fb475019277", "X.B6e", "AsW", "X.Cjr", "X.Cjr", "X.5EF", "X.5EH", "X.9a5",
                 "X.7XW", "X.8Ob", "X.8Ni", "X.7x1", 177
             ),
             ReelsListenerSpec(
-                "fb579", "X.B94", "AuA", "X.CZQ", "X.555", "X.556", "X.9dO",
+                "fb579", "X.B94", "AuA", "X.CZQ", "X.CZQ", "X.555", "X.556", "X.9dO",
                 "X.7oh", "X.8fp", "X.8et", "X.7V4", 178
             )
         )
@@ -367,7 +367,6 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     method.parameterTypes[4] == java.lang.Boolean.TYPE &&
                     method.parameterTypes[5] == java.lang.Boolean.TYPE
             }
-
             if (publishers.isEmpty()) return null
 
             val listenerData = bridge.findMethod {
@@ -393,6 +392,33 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 }
             }
 
+            fun looksLikeStateClass(candidate: Class<*>): Boolean {
+                val hasMapField = candidate.declaredFields.any { field ->
+                    !Modifier.isStatic(field.modifiers) &&
+                        java.util.Map::class.java.isAssignableFrom(field.type)
+                }
+                val hasMapCtor = candidate.declaredConstructors.any { ctor ->
+                    ctor.parameterTypes.size == 1 &&
+                        java.util.Map::class.java.isAssignableFrom(ctor.parameterTypes[0])
+                }
+                return hasMapField && hasMapCtor
+            }
+
+            fun concreteEventsFor(contract: Class<*>): List<Class<*>> {
+                if (!contract.isInterface) return listOf(contract)
+                return bridge.findClass {
+                    matcher {
+                        addInterface(contract.name)
+                    }
+                }.take(64).mapNotNull { data ->
+                    runCatching { data.getInstance(classLoader) }.getOrNull()
+                }.filter { clazz ->
+                    clazz.name.startsWith("X.") &&
+                        !clazz.isInterface &&
+                        contract.isAssignableFrom(clazz)
+                }
+            }
+
             for (listenerInfo in listenerData.take(24)) {
                 val listener = runCatching {
                     listenerInfo.getMethodInstance(classLoader)
@@ -404,135 +430,149 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     listener.parameterCount != 1
                 ) continue
 
-                val eventClass = listener.parameterTypes[0]
-                if (!eventClass.name.startsWith("X.")) continue
-
-                val eventStateField = eventClass.declaredFields.firstOrNull { field ->
-                    if (Modifier.isStatic(field.modifiers)) return@firstOrNull false
-                    val candidate = field.type
-                    val hasMapField = candidate.declaredFields.any { stateField ->
-                        !Modifier.isStatic(stateField.modifiers) &&
-                            java.util.Map::class.java.isAssignableFrom(stateField.type)
-                    }
-                    val hasMapCtor = candidate.declaredConstructors.any { ctor ->
-                        ctor.parameterTypes.size == 1 &&
-                            java.util.Map::class.java.isAssignableFrom(ctor.parameterTypes[0])
-                    }
-                    hasMapField && hasMapCtor
-                } ?: continue
-                val stateClass = eventStateField.type
+                val listenerContract = listener.parameterTypes[0]
+                if (!listenerContract.name.startsWith("X.")) continue
 
                 val listenerDescriptor = runCatching {
                     org.luckypray.dexkit.util.DexSignUtil.getMethodDescriptor(listener)
                 }.getOrNull() ?: continue
 
-                val helperMethods = bridge.findMethod {
-                    matcher {
-                        returnType = "boolean"
-                        paramCount = 2
-                        addCaller(listenerDescriptor)
-                    }
-                }.mapNotNull { data ->
-                    runCatching { data.getMethodInstance(classLoader) }.getOrNull()
-                }
+                for (eventClass in concreteEventsFor(listenerContract)) {
+                    val directStateClasses = eventClass.declaredFields.mapNotNull { field ->
+                        if (Modifier.isStatic(field.modifiers)) null else field.type
+                    }.filter(::looksLikeStateClass)
 
-                val statePredicate = helperMethods.firstOrNull { helper ->
-                    if (!Modifier.isStatic(helper.modifiers)) return@firstOrNull false
-                    val params = helper.parameterTypes
-                    if (params.size != 2 || params[1] != stateClass) return@firstOrNull false
-                    val keyClass = params[0]
-                    if (!keyClass.name.startsWith("X.")) return@firstOrNull false
-                    val staticNames = keyClass.declaredFields
-                        .filter { Modifier.isStatic(it.modifiers) }
-                        .map { it.name }
-                        .toSet()
-                    reelsFalseStateKeyNames.all(staticNames::contains)
-                } ?: continue
-                val keyClass = statePredicate.parameterTypes[0]
+                    val accessorStateClasses = eventClass.declaredMethods.mapNotNull { method ->
+                        if (
+                            Modifier.isStatic(method.modifiers) ||
+                            method.parameterCount != 0 ||
+                            method.returnType == Void.TYPE
+                        ) null else method.returnType
+                    }.filter(::looksLikeStateClass)
 
-                for (publisher in publishers) {
-                    data class Node(
-                        val clazz: Class<*>,
-                        val path: List<Class<*>>
-                    )
+                    val stateClass = (directStateClasses + accessorStateClasses)
+                        .distinct()
+                        .firstOrNull() ?: continue
 
-                    fun isStateOwner(candidate: Class<*>): Boolean {
-                        val fields = candidate.declaredFields.filter {
-                            !Modifier.isStatic(it.modifiers)
+                    val helperMethods = bridge.findMethod {
+                        matcher {
+                            returnType = "boolean"
+                            paramCount = 2
+                            addCaller(listenerDescriptor)
                         }
-                        val hasPublisher = fields.any {
-                            it.type == publisher.declaringClass
-                        }
-                        val booleanCount = fields.count {
-                            it.type == java.util.concurrent.atomic.AtomicBoolean::class.java
-                        }
-                        val intCount = fields.count {
-                            it.type == java.util.concurrent.atomic.AtomicInteger::class.java
-                        }
-                        val refCount = fields.count {
-                            it.type == java.util.concurrent.atomic.AtomicReference::class.java
-                        }
-                        return hasPublisher &&
-                            booleanCount >= 3 &&
-                            intCount >= 1 &&
-                            refCount >= 2
+                    }.mapNotNull { data ->
+                        runCatching { data.getMethodInstance(classLoader) }.getOrNull()
                     }
 
-                    val queue = ArrayDeque<Node>()
-                    val seen = HashSet<Class<*>>()
-                    queue.add(Node(listener.declaringClass, emptyList()))
-                    seen.add(listener.declaringClass)
-
-                    var ownerPath: List<Class<*>>? = null
-                    while (queue.isNotEmpty() && seen.size <= 96 && ownerPath == null) {
-                        val node = queue.removeFirst()
-                        if (node.path.size >= 4) continue
-
-                        val fields = node.clazz.declaredFields.filter { field ->
-                            !Modifier.isStatic(field.modifiers) &&
-                                field.type.name.startsWith("X.")
+                    val statePredicate = helperMethods.firstOrNull { helper ->
+                        if (!Modifier.isStatic(helper.modifiers)) return@firstOrNull false
+                        val params = helper.parameterTypes
+                        if (params.size != 2 || params[1] != stateClass) {
+                            return@firstOrNull false
                         }
-                        for (field in fields) {
-                            val next = field.type
-                            if (!seen.add(next)) continue
-                            val nextPath = node.path + next
-                            if (nextPath.size == 3 && isStateOwner(next)) {
-                                ownerPath = nextPath
-                                break
+                        val keyClass = params[0]
+                        if (!keyClass.name.startsWith("X.")) return@firstOrNull false
+                        val staticNames = keyClass.declaredFields
+                            .filter { Modifier.isStatic(it.modifiers) }
+                            .map { it.name }
+                            .toSet()
+                        "A09" in staticNames && "A0B" in staticNames
+                    } ?: continue
+                    val keyClass = statePredicate.parameterTypes[0]
+
+                    for (publisher in publishers) {
+                        data class Node(
+                            val clazz: Class<*>,
+                            val path: List<Class<*>>
+                        )
+
+                        fun isStateOwner(candidate: Class<*>): Boolean {
+                            val fields = candidate.declaredFields.filter {
+                                !Modifier.isStatic(it.modifiers)
                             }
-                            queue.add(Node(next, nextPath))
+                            val hasPublisher = fields.any {
+                                it.type == publisher.declaringClass
+                            }
+                            val booleanCount = fields.count {
+                                it.type == java.util.concurrent.atomic.AtomicBoolean::class.java
+                            }
+                            val intCount = fields.count {
+                                it.type == java.util.concurrent.atomic.AtomicInteger::class.java
+                            }
+                            val refCount = fields.count {
+                                it.type == java.util.concurrent.atomic.AtomicReference::class.java
+                            }
+                            return hasPublisher &&
+                                booleanCount >= 3 &&
+                                intCount >= 1 &&
+                                refCount >= 2
                         }
-                    }
 
-                    val path = ownerPath ?: continue
-                    val spec = ReelsListenerSpec(
-                        generation = "structural-stable-marker",
-                        listenerClassName = listener.declaringClass.name,
-                        listenerMethodName = listener.name,
-                        eventClassName = eventClass.name,
-                        stateClassName = stateClass.name,
-                        keyClassName = keyClass.name,
-                        helperClassName = statePredicate.declaringClass.name,
-                        owner1ClassName = path[0].name,
-                        owner2ClassName = path[1].name,
-                        stateOwnerClassName = path[2].name,
-                        publisherClassName = publisher.declaringClass.name,
-                        eventId = 0
-                    )
-                    xlog(
-                        "STRUCTURAL Reels state path resolved " +
-                            "listener=${spec.listenerClassName}.${spec.listenerMethodName} " +
-                            "event=${spec.eventClassName} state=${spec.stateClassName} " +
-                            "helper=${spec.helperClassName}.${statePredicate.name} " +
-                            "owners=${spec.owner1ClassName}->${spec.owner2ClassName}->" +
-                            "${spec.stateOwnerClassName} publisher=${spec.publisherClassName}." +
-                            "${publisher.name}"
-                    )
-                    return spec
+                        val queue = ArrayDeque<Node>()
+                        val seen = HashSet<Class<*>>()
+                        queue.add(Node(listener.declaringClass, emptyList()))
+                        seen.add(listener.declaringClass)
+
+                        var ownerPath: List<Class<*>>? = null
+                        while (
+                            queue.isNotEmpty() &&
+                            seen.size <= 96 &&
+                            ownerPath == null
+                        ) {
+                            val node = queue.removeFirst()
+                            if (node.path.size >= 4) continue
+
+                            val fields = node.clazz.declaredFields.filter { field ->
+                                !Modifier.isStatic(field.modifiers) &&
+                                    field.type.name.startsWith("X.")
+                            }
+                            for (field in fields) {
+                                val next = field.type
+                                if (!seen.add(next)) continue
+                                val nextPath = node.path + next
+                                if (nextPath.size == 3 && isStateOwner(next)) {
+                                    ownerPath = nextPath
+                                    break
+                                }
+                                queue.add(Node(next, nextPath))
+                            }
+                        }
+
+                        val path = ownerPath ?: continue
+                        val spec = ReelsListenerSpec(
+                            generation = "structural-interface-aware",
+                            listenerClassName = listener.declaringClass.name,
+                            listenerMethodName = listener.name,
+                            listenerParamClassName = listenerContract.name,
+                            eventClassName = eventClass.name,
+                            stateClassName = stateClass.name,
+                            keyClassName = keyClass.name,
+                            helperClassName = statePredicate.declaringClass.name,
+                            owner1ClassName = path[0].name,
+                            owner2ClassName = path[1].name,
+                            stateOwnerClassName = path[2].name,
+                            publisherClassName = publisher.declaringClass.name,
+                            eventId = 0
+                        )
+                        xlog(
+                            "STRUCTURAL Reels state path resolved " +
+                                "listener=${spec.listenerClassName}.${spec.listenerMethodName} " +
+                                "contract=${spec.listenerParamClassName} " +
+                                "event=${spec.eventClassName} state=${spec.stateClassName} " +
+                                "helper=${spec.helperClassName}.${statePredicate.name} " +
+                                "owners=${spec.owner1ClassName}->${spec.owner2ClassName}->" +
+                                "${spec.stateOwnerClassName} publisher=${spec.publisherClassName}." +
+                                "${publisher.name}"
+                        )
+                        return spec
+                    }
                 }
             }
 
-            xlog("Structural Reels state path not resolved; using exact fallback mappings")
+            xlog(
+                "Structural Reels state path not resolved; " +
+                    "using verified exact fallback mappings"
+            )
             return null
         }
 
@@ -554,21 +594,19 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val clazz = runCatching {
                 Class.forName(spec.listenerClassName, false, classLoader)
             }.getOrNull() ?: return 0
+            val listenerParamClass = runCatching {
+                Class.forName(spec.listenerParamClassName, false, classLoader)
+            }.getOrNull() ?: return 0
             val eventClass = runCatching {
                 Class.forName(spec.eventClassName, false, classLoader)
             }.getOrNull() ?: return 0
             val method = clazz.declaredMethods.firstOrNull {
                 it.returnType == Void.TYPE &&
                     it.parameterCount == 1 &&
-                    it.parameterTypes[0] == eventClass &&
+                    it.parameterTypes[0] == listenerParamClass &&
                     (it.name == spec.listenerMethodName ||
                         spec.generation.startsWith("structural-"))
             } ?: return 0
-
-            val eventStateField = eventClass.declaredFields.firstOrNull { field ->
-                !Modifier.isStatic(field.modifiers) &&
-                    field.type.name == spec.stateClassName
-            }?.apply { isAccessible = true } ?: return 0
 
             val classifierClass = runCatching {
                 Class.forName(spec.keyClassName, false, classLoader)
@@ -576,6 +614,16 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
             val stateValueClass = runCatching {
                 Class.forName(spec.stateClassName, false, classLoader)
             }.getOrNull() ?: return 0
+            val eventStateField = eventClass.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type == stateValueClass
+            }?.apply { isAccessible = true }
+            val eventStateAccessor = eventClass.declaredMethods.firstOrNull { candidate ->
+                !Modifier.isStatic(candidate.modifiers) &&
+                    candidate.parameterCount == 0 &&
+                    candidate.returnType == stateValueClass
+            }?.apply { isAccessible = true }
+            if (eventStateField == null && eventStateAccessor == null) return 0
             val adStateA0B = runCatching {
                 classifierClass.getDeclaredField("A0B").apply {
                     isAccessible = true
@@ -623,28 +671,29 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 Class.forName(spec.stateOwnerClassName, false, classLoader)
             }.getOrNull() ?: return 0
 
-            val stateAdField = runCatching {
-                stateOwnerClass.getDeclaredField("A02").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val atomicBooleanFields = stateOwnerClass.declaredFields.filter { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type == java.util.concurrent.atomic.AtomicBoolean::class.java
+            }.onEach { it.isAccessible = true }
+            if (atomicBooleanFields.size < 3) return 0
+            val stateAdField = atomicBooleanFields.first()
             val statePublisherField = stateOwnerClass.declaredFields.firstOrNull { field ->
                 !Modifier.isStatic(field.modifiers) &&
                     field.type.name == spec.publisherClassName
             }?.apply { isAccessible = true } ?: return 0
-            val stateIntField = runCatching {
-                stateOwnerClass.getDeclaredField("A05").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
-            val stateRef1Field = runCatching {
-                stateOwnerClass.getDeclaredField("A06").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
-            val stateRef2Field = runCatching {
-                stateOwnerClass.getDeclaredField("A07").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
-            val stateBool1Field = runCatching {
-                stateOwnerClass.getDeclaredField("A01").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
-            val stateBool2Field = runCatching {
-                stateOwnerClass.getDeclaredField("A04").apply { isAccessible = true }
-            }.getOrNull() ?: return 0
+            val stateIntField = stateOwnerClass.declaredFields.firstOrNull { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type == java.util.concurrent.atomic.AtomicInteger::class.java
+            }?.apply { isAccessible = true } ?: return 0
+            val stateRefFields = stateOwnerClass.declaredFields.filter { field ->
+                !Modifier.isStatic(field.modifiers) &&
+                    field.type == java.util.concurrent.atomic.AtomicReference::class.java
+            }.onEach { it.isAccessible = true }
+            if (stateRefFields.size < 2) return 0
+            val stateRef1Field = stateRefFields[0]
+            val stateRef2Field = stateRefFields[1]
+            val stateBool1Field = atomicBooleanFields.getOrNull(1) ?: return 0
+            val stateBool2Field = atomicBooleanFields.getOrNull(2) ?: return 0
 
             val publisherClass = runCatching {
                 Class.forName(spec.publisherClassName, false, classLoader)
@@ -668,7 +717,8 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                     val event = param.args.getOrNull(0) ?: return
                     if (!eventClass.isInstance(event)) return
                     val state = runCatching {
-                        eventStateField.get(event)
+                        eventStateField?.get(event)
+                            ?: eventStateAccessor?.invoke(event)
                     }.getOrNull() ?: return
 
                     val matchesA0B = runCatching {
@@ -823,7 +873,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         @JvmStatic
         fun install(classLoader: ClassLoader, reason: String) {
-            if (installedLabels.containsAll(desiredLabels)) return
+            if (installedLabels.containsAll(requiredLabels)) return
             if (scanAttempts.get() >= MAX_SCAN_ATTEMPTS) return
             if (!scanInProgress.compareAndSet(false, true)) return
             val attempt = scanAttempts.incrementAndGet()
@@ -921,7 +971,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
         private fun scheduleRetries(classLoader: ClassLoader) {
             val handler = Handler(Looper.getMainLooper())
-            longArrayOf(0L, 100L, 350L, 900L, 2_000L, 4_000L, 8_000L, 12_000L).forEachIndexed { i, delay ->
+            longArrayOf(0L, 1_500L, 6_000L).forEachIndexed { i, delay ->
                 handler.postDelayed({ install(classLoader, "attach-retry-${i + 1}") }, delay)
             }
         }
@@ -929,6 +979,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != HOST_PACKAGE) return
+        if (lpparam.processName != HOST_PACKAGE) return
 
         XposedBridge.log(
             "$TAG: MODULE LOADED process=${lpparam.processName} " +
