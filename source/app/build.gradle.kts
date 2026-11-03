@@ -42,6 +42,6 @@ base.archivesName.set("FacebookAppAdsRemover-v${android.defaultConfig.versionNam
 
 dependencies {
     compileOnly("com.github.deltazefiro:XposedBridge:main-SNAPSHOT")
-    implementation("org.luckypray:dexkit:2.0.7")
+    implementation("org.luckypray:dexkit:2.3.0")
     implementation(libs.androidx.core.ktx)
 }
