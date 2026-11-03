@@ -184,7 +184,7 @@ class ObfuscationResistantReelsPoolHooks : IXposedHookLoadPackage {
 
         private fun scheduleRetries(classLoader: ClassLoader) {
             val handler = Handler(Looper.getMainLooper())
-            longArrayOf(0L, 100L, 350L, 900L, 2_000L, 4_000L, 8_000L).forEachIndexed { i, delay ->
+            longArrayOf(0L, 1_500L, 6_000L).forEachIndexed { i, delay ->
                 handler.postDelayed({ install(classLoader, "attach-retry-${i + 1}") }, delay)
             }
         }
@@ -192,6 +192,7 @@ class ObfuscationResistantReelsPoolHooks : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != HOST_PACKAGE) return
+        if (lpparam.processName != HOST_PACKAGE) return
 
         hookDexReadiness(lpparam.classLoader)
         if (!attachHookInstalled.compareAndSet(false, true)) return
