@@ -59,8 +59,7 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
         private val requiredLabels = setOf(
             "reels-query-object-wrapper",
             "rti-void-handoff",
-            "reels-content-video-ad-state-gate",
-            "reels-content-video-ad-state-listener"
+            "reels-content-video-ad-state-gate"
         )
 
         private fun xlog(message: String) {
@@ -671,29 +670,40 @@ class ObfuscationResistantReelsGapHooks : IXposedHookLoadPackage {
                 Class.forName(spec.stateOwnerClassName, false, classLoader)
             }.getOrNull() ?: return 0
 
-            val atomicBooleanFields = stateOwnerClass.declaredFields.filter { field ->
-                !Modifier.isStatic(field.modifiers) &&
-                    field.type == java.util.concurrent.atomic.AtomicBoolean::class.java
-            }.onEach { it.isAccessible = true }
-            if (atomicBooleanFields.size < 3) return 0
-            val stateAdField = atomicBooleanFields.first()
+            val stateAdField = runCatching {
+                stateOwnerClass.getDeclaredField("A02").takeIf {
+                    it.type == java.util.concurrent.atomic.AtomicBoolean::class.java
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
             val statePublisherField = stateOwnerClass.declaredFields.firstOrNull { field ->
                 !Modifier.isStatic(field.modifiers) &&
                     field.type.name == spec.publisherClassName
             }?.apply { isAccessible = true } ?: return 0
-            val stateIntField = stateOwnerClass.declaredFields.firstOrNull { field ->
-                !Modifier.isStatic(field.modifiers) &&
-                    field.type == java.util.concurrent.atomic.AtomicInteger::class.java
-            }?.apply { isAccessible = true } ?: return 0
-            val stateRefFields = stateOwnerClass.declaredFields.filter { field ->
-                !Modifier.isStatic(field.modifiers) &&
-                    field.type == java.util.concurrent.atomic.AtomicReference::class.java
-            }.onEach { it.isAccessible = true }
-            if (stateRefFields.size < 2) return 0
-            val stateRef1Field = stateRefFields[0]
-            val stateRef2Field = stateRefFields[1]
-            val stateBool1Field = atomicBooleanFields.getOrNull(1) ?: return 0
-            val stateBool2Field = atomicBooleanFields.getOrNull(2) ?: return 0
+            val stateIntField = runCatching {
+                stateOwnerClass.getDeclaredField("A05").takeIf {
+                    it.type == java.util.concurrent.atomic.AtomicInteger::class.java
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateRef1Field = runCatching {
+                stateOwnerClass.getDeclaredField("A06").takeIf {
+                    it.type == java.util.concurrent.atomic.AtomicReference::class.java
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateRef2Field = runCatching {
+                stateOwnerClass.getDeclaredField("A07").takeIf {
+                    it.type == java.util.concurrent.atomic.AtomicReference::class.java
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateBool1Field = runCatching {
+                stateOwnerClass.getDeclaredField("A01").takeIf {
+                    it.type == java.util.concurrent.atomic.AtomicBoolean::class.java
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
+            val stateBool2Field = runCatching {
+                stateOwnerClass.getDeclaredField("A04").takeIf {
+                    it.type == java.util.concurrent.atomic.AtomicBoolean::class.java
+                }?.apply { isAccessible = true }
+            }.getOrNull() ?: return 0
 
             val publisherClass = runCatching {
                 Class.forName(spec.publisherClassName, false, classLoader)
