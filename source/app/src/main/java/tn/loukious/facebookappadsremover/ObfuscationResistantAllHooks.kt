@@ -30,7 +30,7 @@ class ObfuscationResistantAllHooks : IXposedHookLoadPackage {
     companion object {
         private const val TAG = "FBAdsObfAll"
         private const val HOST_PACKAGE = "com.facebook.katana"
-        private const val MAX_FULL_SCAN_ATTEMPTS = 6
+        private const val MAX_FULL_SCAN_ATTEMPTS = 4
 
         private val attachHookInstalled = AtomicBoolean(false)
         private val dexReadyHookInstalled = AtomicBoolean(false)
@@ -157,7 +157,7 @@ class ObfuscationResistantAllHooks : IXposedHookLoadPackage {
 
         private fun scheduleRetries(classLoader: ClassLoader) {
             val handler = Handler(Looper.getMainLooper())
-            val delays = longArrayOf(0L, 100L, 350L, 900L, 2_000L, 4_000L, 8_000L)
+            val delays = longArrayOf(0L, 1_500L, 6_000L)
             delays.forEachIndexed { index, delay ->
                 handler.postDelayed({
                     ObfuscationResistantVideoHooks.installFocusedStableStringHooks(
@@ -175,6 +175,7 @@ class ObfuscationResistantAllHooks : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != HOST_PACKAGE) return
+        if (lpparam.processName != HOST_PACKAGE) return
 
         // Reuse the strict stable-string video resolver. It contains no hard-coded X.* names.
         ObfuscationResistantVideoHooks().handleLoadPackage(lpparam)
