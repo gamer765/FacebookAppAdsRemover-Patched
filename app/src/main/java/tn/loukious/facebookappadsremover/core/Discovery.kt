@@ -38,6 +38,12 @@ enum class HookAction {
     /** return false — boolean ad checks (mod: banner-ads replacement). */
     BLOCK_FALSE,
     /**
+     * Preserve the call but force its final boolean argument false. Used by
+     * the ReelsVddLayout in-content-ad state publisher so the organic Reel
+     * never transitions into the hidden ad-playing state.
+     */
+    FORCE_LAST_BOOLEAN_FALSE,
+    /**
      * Ad-check the receiver/args first; null only sponsored stories
      * (mod: FNjBxTKppvYVTRFkExAd field-read + X.2Wa.A00 classifier).
      */
