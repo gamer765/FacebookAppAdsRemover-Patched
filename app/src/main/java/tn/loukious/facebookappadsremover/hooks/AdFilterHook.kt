@@ -178,6 +178,7 @@ object AdFilterHook {
     private fun hookerFor(action: HookAction, surfaces: Set<AdSurface>, label: String): Hooker = when (action) {
         HookAction.BLOCK_NULL -> LoggingBlockHook(label, surfaces)
         HookAction.BLOCK_FALSE -> SurfaceFalseHook(surfaces)
+        HookAction.FORCE_LAST_BOOLEAN_FALSE -> ForceLastBooleanFalseHook(label, surfaces)
         HookAction.SPONSORED_NULL -> SponsoredNullHook(surfaces)
         HookAction.RECEIVER_SPONSORED_NULL -> ReceiverSponsoredNullHook(surfaces)
     }
@@ -200,6 +201,35 @@ object AdFilterHook {
             return nullResult(chain.executable as? Method)
         }
         private var logged = false
+    }
+
+    /**
+     * Preserve the original state-publication call but force only its final
+     * boolean false. This is the structural replacement for the old exact
+     * X.7x1/X.7w8/... Reels state-gate mappings.
+     */
+    private class ForceLastBooleanFalseHook(
+        private val label: String,
+        private val surfaces: Set<AdSurface>,
+    ) : Hooker {
+        private var logged = false
+
+        override fun intercept(chain: XposedInterface.Chain): Any? {
+            if (!enabled(surfaces)) return chain.proceed()
+            val args = chain.args
+            if (args.isEmpty() || args.lastOrNull() !is Boolean) {
+                return chain.proceed()
+            }
+            if (args.last() != true) return chain.proceed()
+
+            if (!logged) {
+                logged = true
+                L.i(TAG, "force-last-boolean-false fired ($surfaces): $label")
+            }
+            val rewritten = args.toTypedArray()
+            rewritten[rewritten.lastIndex] = false
+            return chain.proceed(rewritten)
+        }
     }
 
     /**
