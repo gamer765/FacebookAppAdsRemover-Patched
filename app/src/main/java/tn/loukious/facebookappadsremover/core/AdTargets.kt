@@ -307,6 +307,71 @@ object AdTargets {
                 }
             }
         },
+        // ---------------- Rebased gamer765 continuity additions ----------------
+        // These four anchors survived every Facebook update we tested from the
+        // 579/580 era through the current build. They complement upstream's
+        // existing Reels ad-param/post-loop blockers without hardcoding X.* names.
+
+        HookTarget(
+            key = "ads.reelsQueryWrapper",
+            description = "Reels ad-query Object wrapper (reels_ad_query_send)",
+            multi = true,
+            action = HookAction.BLOCK_NULL,
+        ) { bridge: DexKitBridge ->
+            bridge.findMethod {
+                matcher {
+                    usingStrings("reels_ad_query_send")
+                }
+            }.filter { it.returnTypeName == "java.lang.Object" }
+        },
+        HookTarget(
+            key = "ads.reelsRtiHandoff",
+            description = "Reels immersive RTI one-arg void handoff",
+            multi = true,
+            action = HookAction.BLOCK_NULL,
+        ) { bridge: DexKitBridge ->
+            bridge.findMethod {
+                matcher {
+                    usingStrings("IMMERSIVE_REAL_TIME_INTENT")
+                    paramCount(1)
+                }
+            }.filter { it.returnTypeName == "void" }
+        },
+        HookTarget(
+            key = "ads.reelsMultiAdsMedia",
+            description = "Reels dedicated multi-ad media runnable",
+            multi = true,
+            action = HookAction.BLOCK_NULL,
+        ) { bridge: DexKitBridge ->
+            bridge.findMethod {
+                matcher {
+                    usingStrings("fb_reels_facebook_reels_multiads_media")
+                    paramCount(0)
+                }
+            }.filter { it.returnTypeName == "void" }
+        },
+        HookTarget(
+            key = "ads.reelsInContentStateGate",
+            description = "ReelsVddLayout in-content-ad state publisher gate",
+            multi = true,
+            action = HookAction.FORCE_LAST_BOOLEAN_FALSE,
+        ) { bridge: DexKitBridge ->
+            bridge.findMethod {
+                matcher {
+                    usingStrings("ReelsVddLayout::commentBarStateChange")
+                    returnType("void")
+                    paramTypes(
+                        null,
+                        null,
+                        "int",
+                        "boolean",
+                        "boolean",
+                        "boolean",
+                    )
+                }
+            }
+        },
+
         HookTarget(
             key = "ads.storyAdBucketParse",
             description = "AdBucketParser.parse story ad-bucket validation (mod: fKtn, X.AP5.A00)",
