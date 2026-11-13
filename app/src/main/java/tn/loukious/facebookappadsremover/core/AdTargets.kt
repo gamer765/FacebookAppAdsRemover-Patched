@@ -359,14 +359,16 @@ object AdTargets {
             bridge.findMethod {
                 matcher {
                     usingStrings("ReelsVddLayout::commentBarStateChange")
-                    returnType("void")
+                    returnType = "void"
                     paramTypes(
-                        null,
-                        null,
-                        "int",
-                        "boolean",
-                        "boolean",
-                        "boolean",
+                        listOf(
+                            null,
+                            null,
+                            "int",
+                            "boolean",
+                            "boolean",
+                            "boolean",
+                        )
                     )
                 }
             }
