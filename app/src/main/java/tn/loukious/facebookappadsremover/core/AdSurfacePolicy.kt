@@ -42,6 +42,13 @@ object AdSurfacePolicy {
         "ads.reelsBannerRender" to reel,
         "ads.reelsAdParams" to reel,
         "ads.reelsPostLoopBanner" to reel,
+        // Extra stable markers carried forward from the gamer765 experimental
+        // branch. These are Reels-only and are resolved structurally/string-
+        // anchored, never by obfuscated X.* names.
+        "ads.reelsQueryWrapper" to reel,
+        "ads.reelsRtiHandoff" to reel,
+        "ads.reelsMultiAdsMedia" to reel,
+        "ads.reelsInContentStateGate" to reel,
         "ads.storyAdBucketParse" to story,
         "ads.adBreakStorySet" to story, // Story-player ad-break setter.
         "ads.shortsMidCardAd" to feedReel, // Shorts unit also appears in Home feed.
