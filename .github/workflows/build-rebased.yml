@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - rebase/upstream-1.25-exp29
+      - experiment/obfuscation-resistant-hooks
     paths:
       - 'app/**'
       - 'build.gradle.kts'
