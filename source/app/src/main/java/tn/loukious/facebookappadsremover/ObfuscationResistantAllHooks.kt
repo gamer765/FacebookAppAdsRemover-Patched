@@ -85,10 +85,12 @@ class ObfuscationResistantAllHooks : IXposedHookLoadPackage {
         }
 
         private fun installFrameworkOnlyHooks() {
+            // Keep the narrow game bridge hook, but do not install the global
+            // View/TextView/WebView/Activity fallbacks. Those framework hooks run
+            // across Facebook's entire main UI (including login/account flows) and
+            // are too broad for a stability-focused production build.
             runCatching { installGameAdJavascriptInterfaceBridgeHook() }
                 .onFailure { Log.w(TAG, "Early game-ad bridge hook failed", it) }
-            runCatching { installGlobalAdSurfaceFallbacksEarly() }
-                .onFailure { Log.w(TAG, "Early semantic ad-surface hooks failed", it) }
         }
 
         private fun installFullGenericSuite(classLoader: ClassLoader, reason: String) {
