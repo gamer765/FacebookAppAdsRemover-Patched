@@ -11,8 +11,8 @@ android {
         applicationId = "tn.loukious.facebookappadsremover"
         minSdk = 27
         targetSdk = 35
-        versionCode = 26
-        versionName = "1.25"
+        versionCode = 45
+        versionName = "1.25-gamer765-rebase1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -66,7 +66,7 @@ dependencies {
     implementation("io.github.libxposed:service:101.0.0")
 
     // Runtime dex search for hook-point discovery (replaces the original mod's dexplore).
-    implementation("org.luckypray:dexkit:2.2.0")
+    implementation("org.luckypray:dexkit:2.3.0")
 
     // Downloader (role of the original mod's okhttp3/MeiOkHttp).
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
