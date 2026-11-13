@@ -26,6 +26,14 @@ class AdSurfacePolicyTest {
             AdSurfacePolicy.targetSurfaces("ads.storyAdBucketParse"))
         assertEquals(setOf(AdSurface.REELS),
             AdSurfacePolicy.targetSurfaces("ads.reelsVideoAdQuery"))
+        listOf(
+            "ads.reelsQueryWrapper",
+            "ads.reelsRtiHandoff",
+            "ads.reelsMultiAdsMedia",
+            "ads.reelsInContentStateGate",
+        ).forEach { key ->
+            assertEquals(setOf(AdSurface.REELS), AdSurfacePolicy.targetSurfaces(key))
+        }
     }
 
     @Test fun sharedTargetsAreExplicitAndOnlyEnabledWhenEverySurfaceEnabled() {
